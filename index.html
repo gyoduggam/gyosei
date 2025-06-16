@@ -9,7 +9,7 @@
     <!-- Firebase SDKs -->
     <script type="module">
         import { initializeApp, getApps, getApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
-        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
         import { getFirestore, doc, addDoc, setDoc, updateDoc, deleteDoc, onSnapshot, collection, query, where, getDocs } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
         // Firebase configuration (provided by Canvas environment OR user)
@@ -24,22 +24,17 @@
         } else {
             // Running outside Canvas (e.g., GitHub Pages)
             console.warn("Canvas 환경 변수가 감지되지 않았습니다. 사용자 제공 Firebase 설정으로 대체합니다.");
-            // IMPORTANT: If running outside of Google's Canvas environment (e.g., on GitHub Pages),
-            // you need to provide your own Firebase project configuration here.
-            // 1. Go to Firebase Console (console.firebase.google.com)
-            // 2. Create a new project.
-            // 3. Add a web app to your project.
-            // 4. Copy the config object provided by Firebase and paste it below.
-            //    Example:
+            // IMPORTANT: This is YOUR Firebase project configuration.
+            // Replace the values below with your actual Firebase project's config.
             firebaseConfig = {
-  apiKey: "AIzaSyCrVYWYnMy4r5bj6aRo4_pqqQnk48LXN20",
-  authDomain: "gyosei-981ca.firebaseapp.com",
-  projectId: "gyosei-981ca",
-  storageBucket: "gyosei-981ca.firebasestorage.app",
-  messagingSenderId: "1079457334042",
-  appId: "1:1079457334042:web:063551b36f38c2e5dee2a3",
-  measurementId: "G-SSJ8Y3GRRD"
-};
+                apiKey: "AIzaSyCrVYWYnMy4r5bj6aRo4_pqqQnk48LXN20",
+                authDomain: "gyosei-981ca.firebaseapp.com",
+                projectId: "gyosei-981ca",
+                storageBucket: "gyosei-981ca.firebasestorage.app",
+                messagingSenderId: "1079457334042",
+                appId: "1:1079457334042:web:063551b36f38c2e5dee2a3",
+                measurementId: "G-SSJ8Y3GRRD"
+            };
             // Fallback for window.appId when not in Canvas
             canvasProvidedAppId = firebaseConfig.projectId || 'default-external-app-id';
         }
@@ -54,6 +49,7 @@
         let dbInstance;
         let authInstance;
         window.currentUserId = null; // Global currentUserId, updated by auth state listener
+        window.isLoggedIn = false; // Track login status
 
         // Global data store - populated by Firestore snapshots (this remains the data cache)
         window.db = {
@@ -82,38 +78,58 @@
                     // Set up auth state observer
                     onAuthStateChanged(authInstance, async (user) => {
                         if (user) {
+                            // User is successfully authenticated (email/password, custom token, or anonymous)
                             window.currentUserId = user.uid;
+                            window.isLoggedIn = !user.isAnonymous; // True if not anonymous
                             document.getElementById('user-id-display').textContent = `사용자 ID: ${window.currentUserId}`;
-                            console.log("Firebase Auth: User signed in with UID:", window.currentUserId);
+                            document.getElementById('auth-buttons').innerHTML = `
+                                <button onclick="window.openModal('auth-modal', 'logout')" class="bg-gray-200 text-gray-700 px-3 py-1 rounded-md hover:bg-gray-300 transition">로그아웃</button>
+                            `;
+                            console.log("Firebase Auth: User signed in with UID:", window.currentUserId, "Anonymous:", user.isAnonymous);
                             initializeFirestoreListeners(); // Start listening to Firestore
                             resolve(); // Resolve promise when auth is ready
                         } else {
+                            // No user is currently signed in. Attempt to sign in.
                             window.currentUserId = null;
-                            document.getElementById('user-id-display').textContent = `로그인 중...`;
+                            window.isLoggedIn = false;
+                            document.getElementById('user-id-display').textContent = `로그아웃 상태.`;
+                            document.getElementById('auth-buttons').innerHTML = `
+                                <button onclick="window.openModal('auth-modal', 'login')" class="bg-[#A37E63] text-white px-3 py-1 rounded-md hover:bg-[#8e6a51] transition">로그인</button>
+                                <button onclick="window.openModal('auth-modal', 'signup')" class="bg-blue-500 text-white px-3 py-1 rounded-md hover:bg-blue-600 transition">회원가입</button>
+                            `;
                             console.log("Firebase Auth: No user signed in. Attempting sign-in...");
-                            try {
-                                if (initialAuthToken) {
-                                    await signInWithCustomToken(authInstance, initialAuthToken);
-                                    console.log("Firebase Auth: Signed in with custom token.");
-                                } else {
+
+                            // Only attempt anonymous sign-in if not in Canvas (as Canvas handles initialAuthToken)
+                            if (typeof __initial_auth_token === 'undefined' || !initialAuthToken) {
+                                try {
                                     await signInAnonymously(authInstance);
-                                    console.log("Firebase Auth: Signed in anonymously.");
+                                    // onAuthStateChanged will be triggered again with the signed-in anonymous user
+                                    console.log("Firebase Auth: Signed in anonymously (fallback).");
+                                } catch (signInError) {
+                                    console.error("Firebase Auth: Anonymous sign-in failed:", signInError);
+                                    document.getElementById('user-id-display').textContent = `로그인 실패 (비로그인). 데이터 저장 불가.`;
+                                    document.getElementById('loading-spinner').innerHTML = `<p class="text-red-500">로그인 실패. 데이터 저장 기능이 제한됩니다. Firebase 콘솔을 확인하세요.</p>`;
+                                    console.warn("Firebase Auth: Anonymous sign-in failed. Data persistence will not work without proper authentication.");
+                                    initializeFirestoreListeners(); // Still attempt listeners (they will likely fail for writes)
+                                    resolve();
                                 }
-                            } catch (signInError) {
-                                console.error("Firebase Auth: Sign-in failed:", signInError);
-                                // Fallback to a random ID if sign-in fails (though data won't persist if security rules require auth)
-                                window.currentUserId = crypto.randomUUID(); // Generate a local ID
-                                document.getElementById('user-id-display').textContent = `사용자 ID (비로그인): ${window.currentUserId}`;
-                                console.warn("Firebase Auth: Anonymous sign-in failed. Data will not persist across sessions or devices without proper authentication.");
-                            } finally { // Ensure listeners are initialized and promise resolves regardless of sign-in success/failure
-                                initializeFirestoreListeners(); // Still attempt listeners even with local ID
-                                resolve(); // Resolve even if sign-in fails
+                            } else {
+                                // If initialAuthToken exists (Canvas environment), wait for it to take effect
+                                // This block ensures Canvas auth works as expected.
+                                try {
+                                    await signInWithCustomToken(authInstance, initialAuthToken);
+                                } catch (e) {
+                                     console.error("Canvas provided token sign-in failed:", e);
+                                     // Fallback to anonymous if custom token fails in Canvas
+                                     await signInAnonymously(authInstance);
+                                }
                             }
                         }
                     }, (error) => {
                         console.error("Firebase Auth state change error:", error);
-                        document.getElementById('loading-spinner').innerHTML = `<p class="text-red-500">인증 오류 발생. 콘솔을 확인하세요.</p>`;
-                        window.currentUserId = crypto.randomUUID(); // Ensure a userId is set
+                        document.getElementById('loading-spinner').innerHTML = `<p class="text-red-500">인증 시스템 오류. 콘솔을 확인하세요.</p>`;
+                        window.currentUserId = null; // Ensure no invalid UID is used
+                        window.isLoggedIn = false;
                         initializeFirestoreListeners(); // Attempt listeners even on auth error
                         resolve(); // Always resolve the promise
                     });
@@ -122,7 +138,8 @@
                     console.error("Firebase 초기화 실패:", e);
                     document.getElementById('loading-spinner').innerHTML = `<p class="text-red-500">Firebase 초기화 실패. 콘솔을 확인하세요.</p>`;
                     // Resolve promise even on error to allow UI to load partially
-                    window.currentUserId = crypto.randomUUID(); // Set a dummy ID if initialization completely fails
+                    window.currentUserId = null; // Set to null if initialization completely fails
+                    window.isLoggedIn = false;
                     initializeFirestoreListeners(); // Attempt listeners anyway
                     resolve();
                 }
@@ -130,17 +147,30 @@
         });
 
         // Global functions for Firestore collection/document references
-        window.getNotesCollectionRef = () => collection(window.firestoreDb, `artifacts/${window.appId}/users/${window.currentUserId}/notes`);
-        window.getErrorsCollectionRef = () => collection(window.firestoreDb, `artifacts/${window.appId}/users/${window.currentUserId}/errors`);
-        window.getReviewScheduleCollectionRef = () => collection(window.firestoreDb, `artifacts/${window.appId}/users/${window.currentUserId}/reviewSchedule`);
-        window.getReviewHistoryDocRef = () => doc(window.firestoreDb, `artifacts/${window.appId}/users/${window.currentUserId}/appData/reviewHistoryDoc`);
+        // These now correctly use window.currentUserId which is only set on successful auth
+        window.getNotesCollectionRef = () => {
+            if (!window.currentUserId) { console.warn("Firestore: Attempted to get notes collection without a valid user ID."); }
+            return collection(window.firestoreDb, `artifacts/${window.appId}/users/${window.currentUserId || 'anonymous'}/notes`); // Fallback to 'anonymous' if no UID
+        };
+        window.getErrorsCollectionRef = () => {
+            if (!window.currentUserId) { console.warn("Firestore: Attempted to get errors collection without a valid user ID."); }
+            return collection(window.firestoreDb, `artifacts/${window.appId}/users/${window.currentUserId || 'anonymous'}/errors`);
+        };
+        window.getReviewScheduleCollectionRef = () => {
+            if (!window.currentUserId) { console.warn("Firestore: Attempted to get review schedule collection without a valid user ID."); }
+            return collection(window.firestoreDb, `artifacts/${window.appId}/users/${window.currentUserId || 'anonymous'}/reviewSchedule`);
+        };
+        window.getReviewHistoryDocRef = () => {
+            if (!window.currentUserId) { console.warn("Firestore: Attempted to get review history document without a valid user ID."); }
+            return doc(window.firestoreDb, `artifacts/${window.appId}/users/${window.currentUserId || 'anonymous'}/appData/reviewHistoryDoc`);
+        };
+
 
         async function initializeFirestoreListeners() {
             // This function focuses only on setting up Firestore listeners.
             // It no longer handles UI visibility directly.
             if (!window.currentUserId) {
-                console.warn("User ID not set when initializing Firestore listeners. Data operations may fail if security rules require authentication.");
-                // We don't return here. Listeners will attempt to set up.
+                console.warn("사용자 ID가 설정되지 않아 Firestore 리스너를 완전히 초기화할 수 없습니다. 보안 규칙에 따라 데이터 작업이 실패할 수 있습니다.");
             }
 
             console.log("Firestore 리스너 초기화 중 (사용자 ID:", window.currentUserId, ")");
@@ -176,6 +206,9 @@
                 }
                 window.renderCharts();
             }, (error) => console.error("복습 기록 리스닝 오류:", error));
+
+            // Hide loading spinner and show main content once all initial listeners are set up
+            // This is handled by window.appReady.then() in the main script now.
         }
     </script>
     <!-- Chosen Palette: Calm Focus -->
@@ -224,6 +257,9 @@
             <h1 class="text-3xl md:text-4xl font-bold text-[#A37E63]">행정서사 합격 관리 시스템</h1>
             <p id="d-day-counter" class="text-lg text-gray-600 mt-2"></p>
             <p id="user-id-display" class="text-sm text-gray-500 mt-1">로그인 중...</p>
+            <div id="auth-buttons" class="mt-4 flex justify-center space-x-2">
+                <!-- Auth buttons will be injected here by JS -->
+            </div>
         </header>
 
         <!-- Loading Spinner -->
@@ -366,10 +402,32 @@
         </div>
     </div>
 
+    <!-- Auth Modal (Login/Signup) -->
+    <div id="auth-modal" class="fixed inset-0 z-50 modal-backdrop hidden items-center justify-center p-4">
+        <div class="bg-white rounded-lg shadow-xl w-full max-w-md p-6 space-y-4">
+            <h3 id="auth-modal-title" class="text-xl font-bold text-[#A37E63]">로그인</h3>
+            <form id="auth-form" class="space-y-4">
+                <div>
+                    <label for="auth-email" class="block text-sm font-medium text-gray-700">이메일</label>
+                    <input type="email" id="auth-email" class="mt-1 w-full p-2 border rounded-md" required>
+                </div>
+                <div>
+                    <label for="auth-password" class="block text-sm font-medium text-gray-700">비밀번호</label>
+                    <input type="password" id="auth-password" class="mt-1 w-full p-2 border rounded-md" required>
+                </div>
+                <div id="auth-error-message" class="text-red-500 text-sm hidden"></div>
+                <div class="flex justify-end space-x-3 mt-4">
+                    <button type="button" onclick="window.closeModal('auth-modal')" class="px-4 py-2 bg-gray-200 rounded-md hover:bg-gray-300">취소</button>
+                    <button type="submit" id="auth-submit-button" class="px-4 py-2 bg-[#A37E63] text-white rounded-md hover:bg-[#8e6a51]">로그인</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
     <script type="module">
         // Import Firebase functions from the SDKs loaded in <head>
         import { initializeApp, getApps, getApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
-        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
         import { getFirestore, doc, addDoc, setDoc, updateDoc, deleteDoc, onSnapshot, collection, query, where, getDocs } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
         // Global data store - populated by Firestore snapshots (this remains the data cache)
@@ -386,6 +444,7 @@
 
         // Variables to hold info for deletion confirmation
         let itemToDelete = { type: null, id: null };
+        let currentAuthMode = 'login'; // 'login' or 'signup'
 
         // Wait for Firebase to be ready before proceeding
         window.appReady.then(() => {
@@ -403,6 +462,9 @@
 
             // Set up listener for the confirm delete button
             document.getElementById('confirm-delete-button').addEventListener('click', executeDeletion);
+
+            // Set up listener for the auth form submit
+            document.getElementById('auth-form').addEventListener('submit', handleAuthFormSubmit);
         });
 
         // --- CORE APP LOGIC ---
@@ -434,27 +496,51 @@
         }
 
         // --- MODAL HANDLING ---
-        window.openModal = function(modalId, data = null) {
+        window.openModal = function(modalId, mode = null) {
+            // Special handling for auth modal
+            if (modalId === 'auth-modal') {
+                document.getElementById('auth-error-message').classList.add('hidden');
+                document.getElementById('auth-email').value = '';
+                document.getElementById('auth-password').value = '';
+
+                if (mode === 'login') {
+                    currentAuthMode = 'login';
+                    document.getElementById('auth-modal-title').textContent = '로그인';
+                    document.getElementById('auth-submit-button').textContent = '로그인';
+                    document.getElementById('auth-submit-button').classList.remove('bg-blue-500', 'hover:bg-blue-600');
+                    document.getElementById('auth-submit-button').classList.add('bg-[#A37E63]', 'hover:bg-[#8e6a51]');
+                } else if (mode === 'signup') {
+                    currentAuthMode = 'signup';
+                    document.getElementById('auth-modal-title').textContent = '회원가입';
+                    document.getElementById('auth-submit-button').textContent = '회원가입';
+                    document.getElementById('auth-submit-button').classList.remove('bg-[#A37E63]', 'hover:bg-[#8e6a51]');
+                    document.getElementById('auth-submit-button').classList.add('bg-blue-500', 'hover:bg-blue-600');
+                } else if (mode === 'logout') {
+                    handleLogout();
+                    return; // Don't open a modal for logout
+                }
+            }
+
             const formId = modalId === 'note-modal' ? 'note-form' : 'error-form';
             // Only reset if it's a form modal (not detail or confirm)
             if (formId) {
                 document.getElementById(formId).reset();
             }
 
-            if (data) {
+            if (mode && (modalId === 'note-modal' || modalId === 'error-modal')) { // For edit mode
                  if (modalId === 'note-modal') {
-                    document.getElementById('note-id').value = data.id;
-                    document.getElementById('note-subject').value = data.subject;
-                    document.getElementById('note-topic').value = data.topic;
-                    document.getElementById('note-keywords').value = data.keywords;
-                    document.getElementById('note-content').value = data.content;
-                    document.getElementById('note-book-page').value = data.bookPage;
+                    document.getElementById('note-id').value = mode.id; // 'mode' is actually 'data' here
+                    document.getElementById('note-subject').value = mode.subject;
+                    document.getElementById('note-topic').value = mode.topic;
+                    document.getElementById('note-keywords').value = mode.keywords;
+                    document.getElementById('note-content').value = mode.content;
+                    document.getElementById('note-book-page').value = mode.bookPage;
                 } else if (modalId === 'error-modal') {
-                    document.getElementById('error-id').value = data.id;
-                    document.getElementById('error-subject').value = data.subject;
-                    document.getElementById('error-choice-summary').value = data.choiceSummary;
-                    document.getElementById('error-mistake-point').value = data.mistakePoint;
-                    document.getElementById('error-commentary').value = data.commentary;
+                    document.getElementById('error-id').value = mode.id;
+                    document.getElementById('error-subject').value = mode.subject;
+                    document.getElementById('error-choice-summary').value = mode.choiceSummary;
+                    document.getElementById('error-mistake-point').value = mode.mistakePoint;
+                    document.getElementById('error-commentary').value = mode.commentary;
                 }
             } else { // Clear hidden IDs if opening for a new item
                  if (modalId === 'note-modal') document.getElementById('note-id').value = '';
@@ -468,12 +554,74 @@
         window.closeModal = function(modalId) {
             document.getElementById(modalId).classList.add('hidden');
             document.getElementById(modalId).classList.remove('flex');
+            // Clear auth error message when closing auth modal
+            if (modalId === 'auth-modal') {
+                document.getElementById('auth-error-message').classList.add('hidden');
+            }
+        }
+
+        // --- AUTHENTICATION OPERATIONS ---
+        async function handleAuthFormSubmit(e) {
+            e.preventDefault();
+            const email = document.getElementById('auth-email').value;
+            const password = document.getElementById('auth-password').value;
+            const errorMessageEl = document.getElementById('auth-error-message');
+            errorMessageEl.classList.add('hidden'); // Hide previous errors
+
+            try {
+                if (currentAuthMode === 'signup') {
+                    await createUserWithEmailAndPassword(window.firebaseAuth, email, password);
+                    console.log("회원가입 성공!");
+                    alert("회원가입 성공! 이제 로그인할 수 있습니다."); // User-friendly alert
+                } else { // 'login'
+                    await signInWithEmailAndPassword(window.firebaseAuth, email, password);
+                    console.log("로그인 성공!");
+                }
+                window.closeModal('auth-modal');
+            } catch (error) {
+                console.error("인증 오류:", error.code, error.message);
+                let message = "인증 실패: ";
+                switch (error.code) {
+                    case 'auth/email-already-in-use':
+                        message += '이미 사용 중인 이메일입니다.';
+                        break;
+                    case 'auth/invalid-email':
+                        message += '유효하지 않은 이메일 형식입니다.';
+                        break;
+                    case 'auth/weak-password':
+                        message += '비밀번호는 최소 6자 이상이어야 합니다.';
+                        break;
+                    case 'auth/user-not-found':
+                    case 'auth/wrong-password':
+                        message += '이메일 또는 비밀번호가 올바르지 않습니다.';
+                        break;
+                    default:
+                        message += '알 수 없는 오류가 발생했습니다. 잠시 후 다시 시도해주세요.';
+                }
+                errorMessageEl.textContent = message;
+                errorMessageEl.classList.remove('hidden');
+            }
+        }
+
+        async function handleLogout() {
+            try {
+                await signOut(window.firebaseAuth);
+                console.log("로그아웃 성공!");
+                // After logout, onAuthStateChanged will be triggered, updating UI
+                // Optionally sign in anonymously immediately after logout in external environment for basic functionality
+                if (typeof __initial_auth_token === 'undefined' || !initialAuthToken) {
+                    await signInAnonymously(window.firebaseAuth);
+                }
+            } catch (error) {
+                console.error("로그아웃 실패:", error);
+                alert("로그아웃 중 오류가 발생했습니다."); // User-friendly alert
+            }
         }
 
         // --- FIRESTORE OPERATIONS ---
         async function handleNoteFormSubmit(e) {
             e.preventDefault();
-            if (!window.currentUserId) { console.error("Firestore 작업에 사용자 ID를 사용할 수 없습니다."); return; }
+            if (!window.currentUserId) { console.error("Firestore 작업에 사용자 ID를 사용할 수 없습니다. (노트 저장)"); alert("로그인 상태에서만 노트 추가가 가능합니다."); return; } // User-friendly alert
 
             const noteId = document.getElementById('note-id').value;
             const noteData = {
@@ -498,12 +646,13 @@
                 window.closeModal('note-modal');
             } catch (e) {
                 console.error("노트 저장 중 오류 발생:", e);
+                alert("노트 저장 중 오류가 발생했습니다. 콘솔을 확인해주세요."); // User-friendly alert
             }
         }
 
         async function handleErrorFormSubmit(e) {
             e.preventDefault();
-            if (!window.currentUserId) { console.error("Firestore 작업에 사용자 ID를 사용할 수 없습니다."); return; }
+            if (!window.currentUserId) { console.error("Firestore 작업에 사용자 ID를 사용할 수 없습니다. (오답 노트 저장)"); alert("로그인 상태에서만 오답 노트 추가가 가능합니다."); return; } // User-friendly alert
 
             const errorId = document.getElementById('error-id').value;
             const errorData = {
@@ -527,11 +676,12 @@
                 window.closeModal('error-modal');
             } catch (e) {
                 console.error("오답 노트 저장 중 오류 발생:", e);
+                alert("오답 노트 저장 중 오류가 발생했습니다. 콘솔을 확인해주세요."); // User-friendly alert
             }
         }
 
         async function addReviewScheduleItem(type, itemId, createdAt) {
-            if (!window.currentUserId) { console.error("Firestore 작업에 사용자 ID를 사용할 수 없습니다."); return; }
+            if (!window.currentUserId) { console.error("Firestore 작업에 사용자 ID를 사용할 수 없습니다. (복습 스케줄 추가)"); return; }
             const today = new Date().toISOString().split('T')[0];
             try {
                 await addDoc(window.getReviewScheduleCollectionRef(), {
@@ -548,7 +698,7 @@
         }
 
         window.markAsReviewed = async function(scheduleId) {
-            if (!window.currentUserId) { console.error("Firestore 작업에 사용자 ID를 사용할 수 없습니다."); return; }
+            if (!window.currentUserId) { console.error("Firestore 작업에 사용자 ID를 사용할 수 없습니다. (복습 완료 처리)"); alert("로그인 상태에서만 복습 완료가 가능합니다."); return; } // User-friendly alert
 
             const item = window.db.reviewSchedule.find(s => s.id === scheduleId);
             if (!item) { console.error("복습 스케줄 항목을 찾을 수 없습니다."); return; }
@@ -585,11 +735,13 @@
 
             } catch (e) {
                 console.error("복습 완료 처리 중 오류 발생:", e);
+                alert("복습 완료 처리 중 오류가 발생했습니다. 콘솔을 확인해주세요."); // User-friendly alert
             }
         }
 
         // Modified deleteItem to use custom confirm modal
         window.deleteItem = async function(type, docId) {
+            if (!window.currentUserId) { console.error("Firestore 작업에 사용자 ID를 사용할 수 없습니다. (삭제 확인)"); alert("로그인 상태에서만 항목 삭제가 가능합니다."); return; } // User-friendly alert
             itemToDelete = { type: type, id: docId }; // Store info for deletion
             window.openModal('delete-confirm-modal'); // Open the custom confirmation modal
         }
@@ -603,7 +755,7 @@
                 window.closeModal('delete-confirm-modal');
                 return;
             }
-            if (!window.currentUserId) { console.error("Firestore 작업에 사용자 ID를 사용할 수 없습니다."); return; }
+            if (!window.currentUserId) { console.error("Firestore 작업에 사용자 ID를 사용할 수 없습니다. (삭제 실행)"); return; }
 
             try {
                 // Delete the main item
@@ -628,6 +780,7 @@
 
             } catch (e) {
                 console.error("항목 삭제 중 오류 발생:", e);
+                alert("항목 삭제 중 오류가 발생했습니다. 콘솔을 확인해주세요."); // User-friendly alert
                 window.closeModal('delete-confirm-modal'); // Close modal even on error
             }
         }
@@ -666,9 +819,10 @@
 
         window.renderList = function(type) {
             const listEl = document.getElementById(`${type}s-list`);
-            const dataList = window.db[`${type}s`];
+            // Ensure dataList is always an array, even if window.db[type+'s'] is undefined
+            const dataList = window.db[`${type}s`] || []; 
 
-            if (!dataList || dataList.length === 0) {
+            if (dataList.length === 0) {
                 listEl.innerHTML = `<div class="text-center text-gray-500 p-4">아직 추가된 ${type === 'note' ? '노트가' : '오답이'} 없습니다.</div>`;
                 return;
             }
