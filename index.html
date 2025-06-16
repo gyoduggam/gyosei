@@ -1,0 +1,763 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>행정서사 합격 관리 대시보드</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <!-- Firebase SDKs -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, setDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Firebase global variables (provided by Canvas environment)
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        // Initialize Firebase app and services
+        const app = initializeApp(firebaseConfig);
+        const db = getFirestore(app);
+        const auth = getAuth(app);
+
+        // Global variables for main script to access Firebase instances
+        window.firebaseApp = app;
+        window.firebaseDb = db;
+        window.firebaseAuth = auth;
+        window.firebaseInitialAuthToken = initialAuthToken;
+        window.firebaseAppId = appId;
+        window.onAuthStateChanged = onAuthStateChanged; // Expose for main script
+        window.signInAnonymously = signInAnonymously;
+        window.signInWithCustomToken = signInWithCustomToken;
+        window.doc = doc;
+        window.setDoc = setDoc;
+        window.onSnapshot = onSnapshot;
+    </script>
+    <!-- Chosen Palette: Calm Focus -->
+    <!-- Application Structure Plan: 이 어플리케이션은 사용자의 일일 학습 흐름에 최적화된 '대시보드 중심 구조'로 설계되었습니다. 메인 화면에서는 '오늘의 복습' 항목을 최우선으로 보여주어 매일 해야 할 가장 중요한 작업을 명확히 제시합니다. 하단에는 학습 진행 상황을 직관적으로 파악할 수 있는 차트들을 배치하여 동기를 부여합니다. 사용자는 상단 탭을 통해 언제든지 '단권화 노트'나 '오답 노트'의 전체 목록을 조회하거나 새로운 내용을 추가할 수 있습니다. 이는 보고서의 선형적 구조를 따르기보다, '오늘 할 일 확인 → 학습 수행 → 진행 상황 점검 → 기록 및 관리'라는 실제 학습 사이클에 맞춘 사용자 중심의 비선형적이고 효율적인 구조입니다. -->
+    <!-- Visualization & Content Choices: 
+        - Report Info: 과목별 학습량 -> Goal: 학습 분량 비교 -> Viz/Presentation: 도넛 차트 (Chart.js) -> Interaction: 호버 시 툴팁으로 수치 확인 -> Justification: 전체 학습에서 각 과목이 차지하는 비중을 한눈에 파악하여 균형 있는 학습 계획 수립을 도움.
+        - Report Info: 과목별 오답 수 -> Goal: 취약점 파악 -> Viz/Presentation: 막대 차트 (Chart.js) -> Interaction: 호버 시 툴팁으로 수치 확인 -> Justification: 어떤 과목에 더 집중해야 하는지 명확하게 시각화하여 전략적 학습을 유도.
+        - Report Info: 일별 복습 완료 수 -> Goal: 학습 꾸준함 추적 -> Viz/Presentation: 라인 차트 (Chart.js) -> Interaction: 호버 시 툴팁으로 수치 확인 -> Justification: 매일의 복습 성과를 그래프로 보여주어 학습 습관 형성을 격려하고 성취감을 제공.
+        - Report Info: 단권화/오답 노트 목록 -> Goal: 정보 정리 및 조회 -> Viz/Presentation: 동적 테이블 (HTML/CSS/JS) -> Interaction: 검색, 필터링, 상세 보기 -> Justification: 방대한 학습 내용을 효율적으로 관리하고 필요할 때 신속하게 찾아볼 수 있도록 지원.
+        - NEW: AI 기능 - 오답 분석 도우미 -> Goal: 오답 원인 심층 분석 -> Viz/Presentation: 텍스트 (LLM 생성) -> Interaction: 버튼 클릭 시 AI 분석 요청 -> Justification: 오답의 핵심 원인을 AI가 간결하게 요약하여 재발 방지에 도움.
+        - NEW: AI 기능 - 단권화 요약 도우미 -> Goal: 핵심 내용 빠른 파악 -> Viz/Presentation: 텍스트 (LLM 생성) -> Interaction: 버튼 클릭 시 AI 요약 요청 -> Justification: 방대한 단권화 내용을 AI가 핵심만 요약하여 복습 시간 단축 및 효율 증대.
+        - NEW: 클라우드 동기화 (Firebase Firestore) -> Goal: 데이터 연동 및 접근성 -> Viz/Presentation: 백엔드 데이터 저장 -> Interaction: 앱 사용 시 자동 동기화 -> Justification: 여러 기기에서 동일한 학습 데이터를 접근하고 관리할 수 있도록 지원하여, 학습 연속성을 확보하고 편의성 증대.
+    -->
+    <!-- CONFIRMATION: NO SVG graphics used. NO Mermaid JS used. -->
+    <style>
+        body { font-family: 'Inter', 'Pretendard', sans-serif; background-color: #FDFBF7; }
+        .chart-container { position: relative; width: 100%; max-width: 600px; margin-left: auto; margin-right: auto; height: 300px; max-height: 350px; }
+        @media (min-width: 768px) { .chart-container { height: 320px; } }
+        .tab-button { transition: all 0.3s ease; }
+        .tab-button.active { color: #A37E63; border-color: #A37E63; font-weight: 600; }
+        .modal-backdrop { background-color: rgba(0,0,0,0.5); }
+        .scroll-area { max-height: calc(100vh - 250px); }
+        .ai-response { min-height: 50px; padding: 12px; background-color: #f7fafc; border-radius: 8px; border: 1px solid #e2e8f0; font-size: 0.9rem; color: #4a5568; white-space: pre-wrap; word-break: break-word; }
+        .loading-spinner { border: 4px solid #f3f3f3; border-top: 4px solid #A37E63; border-radius: 50%; width: 24px; height: 24px; animation: spin 1s linear infinite; display: inline-block; vertical-align: middle; margin-right: 8px; }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+    </style>
+    <link rel="stylesheet" as="style" crossorigin href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/static/pretendard.min.css" />
+</head>
+<body class="text-gray-800">
+
+    <!-- Main Container -->
+    <div class="container mx-auto p-4 md:p-6">
+
+        <!-- Header -->
+        <header class="text-center mb-6">
+            <h1 class="text-3xl md:text-4xl font-bold text-[#A37E63]">행정서사 합격 관리 시스템</h1>
+            <p id="d-day-counter" class="text-lg text-gray-600 mt-2"></p>
+            <p id="user-id-display" class="text-sm text-gray-500 mt-1"></p>
+        </header>
+
+        <!-- Main Content -->
+        <main>
+            <!-- Navigation Tabs -->
+            <div class="mb-6 border-b border-gray-200">
+                <nav class="flex -mb-px space-x-6" aria-label="Tabs">
+                    <button onclick="changeTab('dashboard')" class="tab-button whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm text-gray-500 hover:text-[#A37E63] hover:border-[#A37E63] active" data-tab="dashboard">
+                        대시보드
+                    </button>
+                    <button onclick="changeTab('notes')" class="tab-button whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm text-gray-500 hover:text-[#A37E63] hover:border-[#A37E63]" data-tab="notes">
+                        단권화 노트
+                    </button>
+                    <button onclick="changeTab('errors')" class="tab-button whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm text-gray-500 hover:text-[#A37E63] hover:border-[#A37E63]" data-tab="errors">
+                        오답 노트
+                    </button>
+                </nav>
+            </div>
+
+            <!-- Tab Content -->
+            <div id="tab-content">
+                <!-- Dashboard -->
+                <div id="dashboard" class="space-y-8">
+                    <section>
+                        <h2 class="text-2xl font-semibold mb-4 text-[#B5947C]">📝 오늘의 복습</h2>
+                        <div id="today-review-list" class="space-y-3">
+                            <!-- Today's review items will be injected here -->
+                        </div>
+                    </section>
+                    
+                    <section class="grid grid-cols-1 lg:grid-cols-2 gap-8">
+                        <div>
+                            <h2 class="text-2xl font-semibold mb-4 text-center text-[#B5947C]">📊 과목별 학습 현황</h2>
+                            <div class="chart-container"><canvas id="subjectChart"></canvas></div>
+                        </div>
+                        <div>
+                            <h2 class="text-2xl font-semibold mb-4 text-center text-[#B5947C]">  과목별 오답 수</h2>
+                            <div class="chart-container"><canvas id="errorChart"></canvas></div>
+                        </div>
+                        <div class="lg:col-span-2">
+                             <h2 class="text-2xl font-semibold mb-4 text-center text-[#B5947C]">📈 일별 복습 기록</h2>
+                            <div class="chart-container"><canvas id="reviewHistoryChart"></canvas></div>
+                        </div>
+                    </section>
+                </div>
+                
+                <!-- Notes -->
+                <div id="notes" class="hidden space-y-4">
+                    <div class="flex justify-between items-center">
+                        <h2 class="text-2xl font-semibold text-[#B5947C]">📚 단권화 노트 목록</h2>
+                        <button onclick="openModal('note-modal')" class="bg-[#A37E63] text-white px-4 py-2 rounded-lg shadow hover:bg-[#8e6a51] transition">새 노트 추가</button>
+                    </div>
+                    <div id="notes-list" class="scroll-area overflow-y-auto bg-white/50 p-4 rounded-lg"></div>
+                </div>
+
+                <!-- Errors -->
+                <div id="errors" class="hidden space-y-4">
+                     <div class="flex justify-between items-center">
+                        <h2 class="text-2xl font-semibold text-[#B5947C]">🧐 오답 노트 목록</h2>
+                        <button onclick="openModal('error-modal')" class="bg-[#A37E63] text-white px-4 py-2 rounded-lg shadow hover:bg-[#8e6a51] transition">새 오답 추가</button>
+                    </div>
+                    <div id="errors-list" class="scroll-area overflow-y-auto bg-white/50 p-4 rounded-lg"></div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <!-- Note Modal -->
+    <div id="note-modal" class="fixed inset-0 z-50 modal-backdrop hidden items-center justify-center p-4">
+        <div class="bg-white rounded-lg shadow-xl w-full max-w-2xl">
+            <form id="note-form" class="p-6 space-y-4">
+                <h3 class="text-xl font-bold text-[#A37E63]">단권화 노트 작성</h3>
+                <input type="hidden" id="note-id">
+                <select id="note-subject" class="w-full p-2 border rounded-md" required>
+                    <option value="">과목 선택</option>
+                    <option>헌법</option> <option>행정법</option> <option>민법</option> <option>상법</option> <option>기초법학</option>
+                </select>
+                <input type="text" id="note-topic" placeholder="논점 (예: 행정법 총론: 행정지도)" class="w-full p-2 border rounded-md" required>
+                <input type="text" id="note-keywords" placeholder="키워드 (쉼표로 구분)" class="w-full p-2 border rounded-md">
+                <textarea id="note-content" placeholder="정리 내용" rows="5" class="w-full p-2 border rounded-md"></textarea>
+                <input type="number" id="note-book-page" placeholder="기본서 페이지" class="w-full p-2 border rounded-md">
+                <div class="flex justify-end space-x-3">
+                    <button type="button" onclick="closeModal('note-modal')" class="px-4 py-2 bg-gray-200 rounded-md hover:bg-gray-300">취소</button>
+                    <button type="submit" class="px-4 py-2 bg-[#A37E63] text-white rounded-md hover:bg-[#8e6a51]">저장</button>
+                </div>
+            </form>
+        </div>
+    </div>
+    
+    <!-- Error Modal -->
+    <div id="error-modal" class="fixed inset-0 z-50 modal-backdrop hidden items-center justify-center p-4">
+        <div class="bg-white rounded-lg shadow-xl w-full max-w-2xl">
+            <form id="error-form" class="p-6 space-y-4">
+                <h3 class="text-xl font-bold text-[#A37E63]">오답 노트 작성</h3>
+                <input type="hidden" id="error-id">
+                 <select id="error-subject" class="w-full p-2 border rounded-md" required>
+                    <option value="">과목 선택</option>
+                    <option>헌법</option> <option>행정법</option> <option>민법</option> <option>상법</option> <option>기초법학</option>
+                </select>
+                <input type="text" id="error-choice-summary" placeholder="선택지 내용 요약" class="w-full p-2 border rounded-md" required>
+                <textarea id="error-mistake-point" placeholder="착오 포인트 (왜 틀렸는지 분석)" rows="4" class="w-full p-2 border rounded-md"></textarea>
+                <textarea id="error-commentary" placeholder="해설 요약" rows="3" class="w-full p-2 border rounded-md"></textarea>
+                <div class="flex justify-end space-x-3">
+                    <button type="button" onclick="closeModal('error-modal')" class="px-4 py-2 bg-gray-200 rounded-md hover:bg-gray-300">취소</button>
+                    <button type="submit" class="px-4 py-2 bg-[#A37E63] text-white rounded-md hover:bg-[#8e6a51]">저장</button>
+                </div>
+            </form>
+        </div>
+    </div>
+    
+    <!-- Detail View Modal -->
+    <div id="detail-modal" class="fixed inset-0 z-50 modal-backdrop hidden items-center justify-center p-4">
+        <div class="bg-white rounded-lg shadow-xl w-full max-w-3xl">
+            <div id="detail-content" class="p-6 space-y-4"></div>
+            <div id="ai-section" class="p-6 pt-0 space-y-3 hidden">
+                <h4 class="text-lg font-semibold text-[#B5947C]">✨ AI 도우미</h4>
+                <div id="ai-buttons" class="flex space-x-2">
+                    <button id="ai-note-summary-btn" class="px-4 py-2 bg-purple-100 text-purple-700 rounded-lg shadow hover:bg-purple-200 transition hidden" onclick="generateAISummary()">✨ AI 요약 받기</button>
+                    <button id="ai-error-analysis-btn" class="px-4 py-2 bg-pink-100 text-pink-700 rounded-lg shadow hover:bg-pink-200 transition hidden" onclick="generateAIErrorAnalysis()">✨ AI 오답 분석 받기</button>
+                </div>
+                <div id="ai-response-area" class="mt-4">
+                    <div id="ai-loading" class="hidden flex items-center justify-center text-gray-600">
+                        <span class="loading-spinner"></span>
+                        <span>AI 분석 중...</span>
+                    </div>
+                    <div id="ai-result" class="ai-response hidden"></div>
+                </div>
+            </div>
+            <div class="flex justify-end p-4 bg-gray-50 rounded-b-lg">
+                <button type="button" onclick="closeModal('detail-modal')" class="px-4 py-2 bg-gray-200 rounded-md hover:bg-gray-300">닫기</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // --- Firebase Globals (accessed from window object) ---
+        let firebaseDb;
+        let firebaseAuth;
+        let userId;
+        let isAuthReady = false;
+        let userDataRef; // Firestore document reference for user data
+
+        // --- DATA & STATE MANAGEMENT ---
+        let db = {
+            notes: [],
+            errors: [],
+            reviewSchedule: [],
+            reviewHistory: {}
+        };
+
+        const SUBJECTS = ['헌법', '행정법', '민법', '상법', '기초법학'];
+        const CHART_COLORS = ['#B5947C', '#C8AB99', '#DBC3B5', '#E9DCD2', '#F1EAE4'];
+        let charts = {};
+        let currentDetailData = null; // Store data of the currently viewed detail for AI functions
+
+        // --- CORE APP LOGIC ---
+        document.addEventListener('DOMContentLoaded', () => {
+            setupDDayCounter();
+            initializeFirebaseAndLoadData();
+
+            document.getElementById('note-form').addEventListener('submit', handleNoteFormSubmit);
+            document.getElementById('error-form').addEventListener('submit', handleErrorFormSubmit);
+        });
+        
+        function setupDDayCounter() {
+            const examDate = new Date('2025-11-09T00:00:00');
+            const today = new Date();
+            today.setHours(0,0,0,0);
+            const diffTime = examDate - today;
+            const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+            document.getElementById('d-day-counter').textContent = `시험일까지 D-${diffDays}일`;
+        }
+
+        async function initializeFirebaseAndLoadData() {
+            // Wait for Firebase to be globally available from the module script
+            await new Promise(resolve => {
+                const checkFirebaseReady = setInterval(() => {
+                    if (window.firebaseDb && window.firebaseAuth) {
+                        clearInterval(checkFirebaseReady);
+                        firebaseDb = window.firebaseDb;
+                        firebaseAuth = window.firebaseAuth;
+                        resolve();
+                    }
+                }, 100);
+            });
+
+            // Authenticate user
+            window.onAuthStateChanged(firebaseAuth, async (user) => {
+                if (user) {
+                    userId = user.uid;
+                    isAuthReady = true;
+                } else {
+                    // Sign in anonymously if no user is found
+                    try {
+                        if (window.firebaseInitialAuthToken) {
+                             await window.signInWithCustomToken(firebaseAuth, window.firebaseInitialAuthToken);
+                        } else {
+                             await window.signInAnonymously(firebaseAuth);
+                        }
+                    } catch (error) {
+                        console.error("Firebase authentication failed:", error);
+                        // Fallback to a random ID if authentication completely fails
+                        userId = crypto.randomUUID();
+                        isAuthReady = true;
+                    }
+                }
+                
+                // Once authenticated and userId is set, load data
+                if (isAuthReady && userId) {
+                    userDataRef = window.doc(firebaseDb, `artifacts/${window.firebaseAppId}/public/data/user_data/${userId}`);
+                    document.getElementById('user-id-display').textContent = `사용자 ID: ${userId}`;
+                    loadDataFromFirestore();
+                }
+            });
+        }
+
+        function renderAll() {
+            renderTodayReview();
+            renderNotesList();
+            renderErrorsList();
+            renderCharts();
+        }
+
+        function changeTab(tabName) {
+            document.querySelectorAll('[data-tab]').forEach(button => button.classList.remove('active'));
+            document.querySelector(`[data-tab="${tabName}"]`).classList.add('active');
+
+            ['dashboard', 'notes', 'errors'].forEach(id => {
+                document.getElementById(id).classList.toggle('hidden', id !== tabName);
+            });
+        }
+        
+        // --- DATA PERSISTENCE (Firebase Firestore) ---
+        async function saveDataToFirestore() {
+            if (!isAuthReady || !userId || !userDataRef) {
+                console.warn("Firestore not ready or userId not set. Cannot save data.");
+                return;
+            }
+            try {
+                // Firestore document limit is 1MB, so this should be fine for typical study data
+                await window.setDoc(userDataRef, db);
+            } catch (e) {
+                console.error("Error writing document: ", e);
+            }
+        }
+
+        function loadDataFromFirestore() {
+            if (!isAuthReady || !userId || !userDataRef) {
+                console.warn("Firestore not ready or userId not set. Cannot load data.");
+                return;
+            }
+
+            window.onSnapshot(userDataRef, (docSnap) => {
+                if (docSnap.exists()) {
+                    db = docSnap.data();
+                } else {
+                    // Document does not exist, initialize with empty structure
+                    db = { notes: [], errors: [], reviewSchedule: [], reviewHistory: {} };
+                    saveDataToFirestore(); // Create the document
+                }
+                renderAll(); // Re-render UI with new data
+            }, (error) => {
+                console.error("Error getting document:", error);
+                // In case of error, initialize with empty data
+                db = { notes: [], errors: [], reviewSchedule: [], reviewHistory: {} };
+                renderAll();
+            });
+        }
+        
+        // --- MODAL HANDLING ---
+        function openModal(modalId, data = null) {
+            const formId = modalId === 'note-modal' ? 'note-form' : 'error-form';
+            if (document.getElementById(formId)) { // Check if form exists
+                document.getElementById(formId).reset();
+            }
+
+            if (data) {
+                 if (modalId === 'note-modal') {
+                    document.getElementById('note-id').value = data.id;
+                    document.getElementById('note-subject').value = data.subject;
+                    document.getElementById('note-topic').value = data.topic;
+                    document.getElementById('note-keywords').value = data.keywords;
+                    document.getElementById('note-content').value = data.content;
+                    document.getElementById('note-book-page').value = data.bookPage;
+                } else if (modalId === 'error-modal') {
+                    document.getElementById('error-id').value = data.id;
+                    document.getElementById('error-subject').value = data.subject;
+                    document.getElementById('error-choice-summary').value = data.choiceSummary;
+                    document.getElementById('error-mistake-point').value = data.mistakePoint;
+                    document.getElementById('error-commentary').value = data.commentary;
+                } else if (modalId === 'detail-modal') {
+                    currentDetailData = data; // Store current data for AI functions
+                    document.getElementById('ai-section').classList.remove('hidden');
+                    document.getElementById('ai-note-summary-btn').classList.add('hidden');
+                    document.getElementById('ai-error-analysis-btn').classList.add('hidden');
+                    document.getElementById('ai-result').classList.add('hidden'); // Clear previous AI result
+                    document.getElementById('ai-result').textContent = '';
+
+                    if (data.topic) { // It's a note
+                        document.getElementById('ai-note-summary-btn').classList.remove('hidden');
+                    } else if (data.choiceSummary) { // It's an error
+                        document.getElementById('ai-error-analysis-btn').classList.remove('hidden');
+                    }
+                }
+            } else {
+                 document.getElementById('note-id').value = '';
+                 document.getElementById('error-id').value = '';
+                 document.getElementById('ai-section').classList.add('hidden'); // Hide AI section for new entries
+            }
+
+            document.getElementById(modalId).classList.remove('hidden');
+            document.getElementById(modalId).classList.add('flex');
+        }
+
+        function closeModal(modalId) {
+            document.getElementById(modalId).classList.add('hidden');
+            document.getElementById(modalId).classList.remove('flex');
+            currentDetailData = null; // Clear current detail data
+            document.getElementById('ai-result').classList.add('hidden'); // Ensure AI result is hidden on close
+            document.getElementById('ai-loading').classList.add('hidden'); // Ensure loading is hidden on close
+        }
+        
+        // --- FORM SUBMISSION HANDLERS ---
+        async function handleNoteFormSubmit(e) {
+            e.preventDefault();
+            const id = document.getElementById('note-id').value;
+            const noteData = {
+                id: id ? parseInt(id) : Date.now(),
+                subject: document.getElementById('note-subject').value,
+                topic: document.getElementById('note-topic').value,
+                keywords: document.getElementById('note-keywords').value,
+                content: document.getElementById('note-content').value,
+                bookPage: document.getElementById('note-book-page').value,
+                createdAt: id ? db.notes.find(n=>n.id==id).createdAt : new Date().toISOString()
+            };
+            
+            if (id) { // Update
+                db.notes = db.notes.map(n => n.id == id ? noteData : n);
+            } else { // Create
+                db.notes.push(noteData);
+                addReviewScheduleItem('note', noteData.id, noteData.createdAt);
+            }
+            
+            await saveDataToFirestore();
+            renderAll();
+            closeModal('note-modal');
+        }
+        
+        async function handleErrorFormSubmit(e) {
+            e.preventDefault();
+            const id = document.getElementById('error-id').value;
+            const errorData = {
+                id: id ? parseInt(id) : Date.now(),
+                subject: document.getElementById('error-subject').value,
+                choiceSummary: document.getElementById('error-choice-summary').value,
+                mistakePoint: document.getElementById('error-mistake-point').value,
+                commentary: document.getElementById('error-commentary').value,
+                createdAt: id ? db.errors.find(err=>err.id==id).createdAt : new Date().toISOString()
+            };
+            
+            if (id) { // Update
+                db.errors = db.errors.map(err => err.id == id ? errorData : err);
+            } else { // Create
+                db.errors.push(errorData);
+                addReviewScheduleItem('error', errorData.id, errorData.createdAt);
+            }
+            
+            await saveDataToFirestore();
+            renderAll();
+            closeModal('error-modal');
+        }
+        
+        // --- REVIEW LOGIC ---
+        function addReviewScheduleItem(type, id, createdAt) {
+            const today = new Date().toISOString().split('T')[0];
+            db.reviewSchedule.push({
+                type: type,
+                id: id,
+                createdAt: createdAt,
+                reviewCount: 0,
+                nextReviewDate: today
+            });
+        }
+        
+        async function markAsReviewed(type, id) {
+            const itemIndex = db.reviewSchedule.findIndex(item => item.type === type && item.id === id);
+            if (itemIndex === -1) return;
+
+            const item = db.reviewSchedule[itemIndex];
+            item.reviewCount += 1;
+            
+            const reviewIntervals = [1, 3, 7, 14, 30]; // Days from creation date
+            const nextInterval = reviewIntervals[item.reviewCount-1];
+
+            if(nextInterval) {
+                const creationDate = new Date(item.createdAt);
+                const nextDate = new Date(creationDate);
+                nextDate.setDate(creationDate.getDate() + nextInterval);
+                item.nextReviewDate = nextDate.toISOString().split('T')[0];
+            } else {
+                // After 30 days, just push it a month forward from last review
+                const lastReviewDate = new Date();
+                lastReviewDate.setDate(lastReviewDate.getDate() + 30);
+                item.nextReviewDate = lastReviewDate.toISOString().split('T')[0];
+            }
+            
+            // Record history
+            const todayStr = new Date().toISOString().split('T')[0];
+            db.reviewHistory[todayStr] = (db.reviewHistory[todayStr] || 0) + 1;
+
+            await saveDataToFirestore();
+            renderAll();
+        }
+
+        // --- RENDER FUNCTIONS ---
+        function renderTodayReview() {
+            const listEl = document.getElementById('today-review-list');
+            const today = new Date().toISOString().split('T')[0];
+            const itemsToReview = db.reviewSchedule.filter(item => item.nextReviewDate <= today);
+
+            if (itemsToReview.length === 0) {
+                listEl.innerHTML = `<div class="text-center text-gray-500 p-4 bg-gray-50 rounded-lg">오늘 복습할 항목이 없습니다.</div>`;
+                return;
+            }
+
+            listEl.innerHTML = itemsToReview.map(item => {
+                const data = item.type === 'note'
+                    ? db.notes.find(d => d.id === item.id)
+                    : db.errors.find(d => d.id === item.id);
+                if (!data) return '';
+                
+                const title = item.type === 'note' ? data.topic : data.choiceSummary;
+                
+                return `
+                    <div class="bg-white p-4 rounded-lg shadow-sm flex justify-between items-center">
+                        <div>
+                            <span class="text-xs font-semibold ${item.type === 'note' ? 'text-blue-500 bg-blue-100' : 'text-red-500 bg-red-100'} px-2 py-1 rounded-full">${item.type === 'note' ? '노트' : '오답'}</span>
+                            <span class="ml-3 font-medium">${title}</span>
+                            <span class="text-sm text-gray-500 ml-2">(${data.subject}) - ${item.reviewCount}회 복습</span>
+                        </div>
+                        <button onclick="markAsReviewed('${item.type}', ${item.id})" class="px-3 py-1 bg-green-500 text-white text-sm rounded-lg hover:bg-green-600 transition">복습 완료</button>
+                    </div>
+                `;
+            }).join('');
+        }
+        
+        function renderList(type) {
+            const listEl = document.getElementById(`${type}s-list`);
+            const dataList = db[`${type}s`];
+
+            if (dataList.length === 0) {
+                listEl.innerHTML = `<div class="text-center text-gray-500 p-4">아직 추가된 ${type === 'note' ? '노트가' : '오답이'} 없습니다.</div>`;
+                return;
+            }
+
+            listEl.innerHTML = dataList.map(data => {
+                const title = type === 'note' ? data.topic : data.choiceSummary;
+                return `
+                    <div class="bg-white p-3 rounded-lg shadow-sm mb-2">
+                        <div class="flex justify-between items-start">
+                           <div class="flex-1">
+                               <p class="font-semibold">${title}</p>
+                               <p class="text-sm text-gray-500">${data.subject} | 생성: ${new Date(data.createdAt).toLocaleDateString()}</p>
+                           </div>
+                           <div class="flex space-x-2 ml-2">
+                               <button onclick="viewDetail('${type}', ${data.id})" class="px-3 py-1 bg-blue-100 text-blue-600 text-xs rounded-md hover:bg-blue-200">보기</button>
+                               <button onclick="openModal('${type}-modal', db.${type}s.find(d=>d.id==${data.id}))" class="px-3 py-1 bg-yellow-100 text-yellow-600 text-xs rounded-md hover:bg-yellow-200">수정</button>
+                               <button onclick="deleteItem('${type}', ${data.id})" class="px-3 py-1 bg-red-100 text-red-600 text-xs rounded-md hover:bg-red-200">삭제</button>
+                           </div>
+                        </div>
+                    </div>
+                `
+            }).join('');
+        }
+
+        function renderNotesList() { renderList('note'); }
+        function renderErrorsList() { renderList('error'); }
+        
+        async function deleteItem(type, id) {
+            showCustomConfirm('정말로 삭제하시겠습니까? 관련된 복습 스케줄도 함께 삭제됩니다.', async () => {
+                db[`${type}s`] = db[`${type}s`].filter(item => item.id !== id);
+                db.reviewSchedule = db.reviewSchedule.filter(item => !(item.type === type && item.id === id));
+                
+                await saveDataToFirestore(); // Save updated data to Firestore
+                renderAll();
+            });
+        }
+        
+        // Custom confirm modal replacement
+        function showCustomConfirm(message, onConfirm) {
+            const modalHtml = `
+                <div id="custom-confirm-modal" class="fixed inset-0 z-[100] modal-backdrop flex items-center justify-center p-4">
+                    <div class="bg-white rounded-lg shadow-xl w-full max-w-sm p-6 space-y-4">
+                        <p class="text-lg font-semibold text-gray-800">${message}</p>
+                        <div class="flex justify-end space-x-3">
+                            <button type="button" id="confirm-cancel-btn" class="px-4 py-2 bg-gray-200 rounded-md hover:bg-gray-300">취소</button>
+                            <button type="button" id="confirm-ok-btn" class="px-4 py-2 bg-red-500 text-white rounded-md hover:bg-red-600">삭제</button>
+                        </div>
+                    </div>
+                </div>
+            `;
+            document.body.insertAdjacentHTML('beforeend', modalHtml);
+
+            document.getElementById('confirm-cancel-btn').onclick = () => document.getElementById('custom-confirm-modal').remove();
+            document.getElementById('confirm-ok-btn').onclick = () => {
+                onConfirm();
+                document.getElementById('custom-confirm-modal').remove();
+            };
+        }
+
+
+        function viewDetail(type, id) {
+            const data = db[`${type}s`].find(d => d.id === id);
+            const contentEl = document.getElementById('detail-content');
+            
+            let html = `
+                <h3 class="text-xl font-bold text-[#A37E63]">${type === 'note' ? '노트 상세' : '오답 상세'}</h3>
+                <p><strong class="w-24 inline-block">과목:</strong> ${data.subject}</p>
+                <p><strong class="w-24 inline-block">생성일:</strong> ${new Date(data.createdAt).toLocaleString()}</p>
+            `;
+            
+            if (type === 'note') {
+                html += `
+                    <p><strong class="w-24 inline-block">논점:</strong> ${data.topic}</p>
+                    <p><strong class="w-24 inline-block">키워드:</strong> <span class="bg-gray-100 px-2 py-1 rounded">${data.keywords}</span></p>
+                    <p><strong class="w-24 inline-block">기본서 페이지:</strong> ${data.bookPage || 'N/A'}</p>
+                    <div class="mt-4 p-4 bg-gray-50 rounded-md">
+                        <strong class="block mb-2">정리 내용:</strong>
+                        <p class="whitespace-pre-wrap">${data.content}</p>
+                    </div>
+                `;
+            } else {
+                 html += `
+                    <p><strong class="w-24 inline-block">선택지:</strong> ${data.choiceSummary}</p>
+                    <div class="mt-4 p-4 bg-red-50 rounded-md">
+                        <strong class="block mb-2 text-red-700">착오 포인트:</strong>
+                        <p class="whitespace-pre-wrap">${data.mistakePoint}</p>
+                    </div>
+                     <div class="mt-2 p-4 bg-blue-50 rounded-md">
+                        <strong class="block mb-2 text-blue-700">해설 요약:</strong>
+                        <p class="whitespace-pre-wrap">${data.commentary}</p>
+                    </div>
+                `;
+            }
+            contentEl.innerHTML = html;
+            openModal('detail-modal', data); // Pass data to modal for AI functions
+        }
+
+        // --- CHART RENDERING ---
+        function renderCharts() {
+            renderSubjectChart();
+            renderErrorChart();
+            renderReviewHistoryChart();
+        }
+
+        function renderSubjectChart() {
+            const ctx = document.getElementById('subjectChart').getContext('2d');
+            const data = {
+                labels: SUBJECTS,
+                datasets: [{
+                    label: '과목별 노트 수',
+                    data: SUBJECTS.map(s => db.notes.filter(n => n.subject === s).length),
+                    backgroundColor: CHART_COLORS,
+                    borderColor: '#FDFBF7',
+                    borderWidth: 2
+                }]
+            };
+
+            if (charts.subject) charts.subject.destroy();
+            charts.subject = new Chart(ctx, {
+                type: 'doughnut',
+                data: data,
+                options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'top' } } }
+            });
+        }
+
+        function renderErrorChart() {
+            const ctx = document.getElementById('errorChart').getContext('2d');
+            const data = {
+                labels: SUBJECTS,
+                datasets: [{
+                    label: '과목별 오답 수',
+                    data: SUBJECTS.map(s => db.errors.filter(e => e.subject === s).length),
+                    backgroundColor: CHART_COLORS[0],
+                }]
+            };
+            
+            if (charts.error) charts.error.destroy();
+            charts.error = new Chart(ctx, {
+                type: 'bar',
+                data: data,
+                options: { responsive: true, maintainAspectRatio: false, indexAxis: 'y', plugins: { legend: { display: false } } }
+            });
+        }
+        
+        function renderReviewHistoryChart() {
+            const ctx = document.getElementById('reviewHistoryChart').getContext('2d');
+            const labels = [];
+            const dataPoints = [];
+            const today = new Date();
+            for(let i=14; i>=0; i--) {
+                const date = new Date(today);
+                date.setDate(today.getDate() - i);
+                const dateString = date.toISOString().split('T')[0];
+                labels.push(`${date.getMonth()+1}/${date.getDate()}`);
+                dataPoints.push(db.reviewHistory[dateString] || 0);
+            }
+
+            const data = {
+                labels: labels,
+                datasets: [{
+                    label: '일별 복습 완료 수',
+                    data: dataPoints,
+                    fill: true,
+                    borderColor: CHART_COLORS[0],
+                    backgroundColor: CHART_COLORS[2],
+                    tension: 0.1
+                }]
+            };
+            if(charts.history) charts.history.destroy();
+            charts.history = new Chart(ctx, {
+                type: 'line',
+                data: data,
+                options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } } }
+            });
+        }
+
+        // --- AI INTEGRATION (Gemini API) ---
+        async function callGeminiAPI(prompt) {
+            document.getElementById('ai-loading').classList.remove('hidden');
+            document.getElementById('ai-result').classList.add('hidden');
+            document.getElementById('ai-result').textContent = '';
+
+            try {
+                let chatHistory = [];
+                chatHistory.push({ role: "user", parts: [{ text: prompt }] });
+                const payload = { contents: chatHistory };
+                const apiKey = ""; 
+                const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`;
+                const response = await fetch(apiUrl, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                const result = await response.json();
+
+                if (result.candidates && result.candidates.length > 0 &&
+                    result.candidates[0].content && result.candidates[0].content.parts &&
+                    result.candidates[0].content.parts.length > 0) {
+                    const text = result.candidates[0].content.parts[0].text;
+                    document.getElementById('ai-result').textContent = text;
+                    document.getElementById('ai-result').classList.remove('hidden');
+                } else {
+                    document.getElementById('ai-result').textContent = 'AI 분석 결과를 가져오지 못했습니다. 다시 시도해 주세요.';
+                    document.getElementById('ai-result').classList.remove('hidden');
+                    console.error('Unexpected API response structure:', result);
+                }
+            } catch (error) {
+                document.getElementById('ai-result').textContent = 'AI 분석 중 오류가 발생했습니다. 네트워크 연결을 확인하거나 잠시 후 다시 시도해 주세요.';
+                document.getElementById('ai-result').classList.remove('hidden');
+                console.error('Error calling Gemini API:', error);
+            } finally {
+                document.getElementById('ai-loading').classList.add('hidden');
+            }
+        }
+
+        function generateAISummary() {
+            if (!currentDetailData || !currentDetailData.content) {
+                document.getElementById('ai-result').textContent = '요약할 내용이 없습니다.';
+                document.getElementById('ai-result').classList.remove('hidden');
+                return;
+            }
+            const prompt = `다음 행정서사 시험 대비 단권화 노트 내용을 50단어 이내로 핵심만 요약해 주세요. 내용은 다음과 같습니다:\n\n${currentDetailData.content}`;
+            callGeminiAPI(prompt);
+        }
+
+        function generateAIErrorAnalysis() {
+            if (!currentDetailData || !currentDetailData.mistakePoint || !currentDetailData.commentary) {
+                document.getElementById('ai-result').textContent = '오답 분석을 위한 정보가 부족합니다.';
+                document.getElementById('ai-result').classList.remove('hidden');
+                return;
+            }
+            const prompt = `행정서사 시험 오답 분석을 위한 내용입니다. 다음 '착오 포인트'와 '해설 요약'을 보고, 수험생이 이 문제를 틀린 근본적인 이유를 30단어 이내로 간단히 요약하고 어떤 개념을 혼동했는지 명확히 제시해 주세요.\n\n착오 포인트: ${currentDetailData.mistakePoint}\n해설 요약: ${currentDetailData.commentary}`;
+            callGeminiAPI(prompt);
+        }
+
+    </script>
+</body>
+</html>
+ 
