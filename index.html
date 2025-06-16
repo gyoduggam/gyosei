@@ -110,6 +110,7 @@
                                     document.getElementById('user-id-display').textContent = `로그인 실패 (비로그인). 데이터 저장 불가.`;
                                     document.getElementById('loading-spinner').innerHTML = `<p class="text-red-500">로그인 실패. 데이터 저장 기능이 제한됩니다. Firebase 콘솔을 확인하세요.</p>`;
                                     console.warn("Firebase Auth: Anonymous sign-in failed. Data persistence will not work without proper authentication.");
+
                                     initializeFirestoreListeners(); // Still attempt listeners (they will likely fail for writes)
                                     resolve();
                                 }
@@ -167,8 +168,6 @@
 
 
         async function initializeFirestoreListeners() {
-            // This function focuses only on setting up Firestore listeners.
-            // It no longer handles UI visibility directly.
             if (!window.currentUserId) {
                 console.warn("사용자 ID가 설정되지 않아 Firestore 리스너를 완전히 초기화할 수 없습니다. 보안 규칙에 따라 데이터 작업이 실패할 수 있습니다.");
             }
@@ -206,9 +205,6 @@
                 }
                 window.renderCharts();
             }, (error) => console.error("복습 기록 리스닝 오류:", error));
-
-            // Hide loading spinner and show main content once all initial listeners are set up
-            // This is handled by window.appReady.then() in the main script now.
         }
     </script>
     <!-- Chosen Palette: Calm Focus -->
@@ -368,6 +364,7 @@
                         <option value="">과목 선택</option>
                         <option>헌법</option> <option>행정법</option> <option>민법</option> <option>상법</option> <option>기초법학</option>
                     </select>
+                    <input type="text" id="error-keywords" placeholder="키워드 (쉼표로 구분)" class="w-full p-2 border rounded-md"> <!-- NEW: Keywords for error note -->
                     <input type="text" id="error-choice-summary" placeholder="선택지 내용 요약" class="w-full p-2 border rounded-md" required>
                     <textarea id="error-mistake-point" placeholder="착오 포인트 (왜 틀렸는지 분석)" rows="4" class="w-full p-2 border rounded-md"></textarea>
                     <textarea id="error-commentary" placeholder="해설 요약" rows="3" class="w-full p-2 border rounded-md"></textarea>
@@ -496,51 +493,55 @@
         }
 
         // --- MODAL HANDLING ---
-        window.openModal = function(modalId, mode = null) {
+        window.openModal = function(modalId, modeOrData = null) {
             // Special handling for auth modal
             if (modalId === 'auth-modal') {
                 document.getElementById('auth-error-message').classList.add('hidden');
                 document.getElementById('auth-email').value = '';
                 document.getElementById('auth-password').value = '';
 
-                if (mode === 'login') {
+                if (modeOrData === 'login') {
                     currentAuthMode = 'login';
                     document.getElementById('auth-modal-title').textContent = '로그인';
                     document.getElementById('auth-submit-button').textContent = '로그인';
                     document.getElementById('auth-submit-button').classList.remove('bg-blue-500', 'hover:bg-blue-600');
                     document.getElementById('auth-submit-button').classList.add('bg-[#A37E63]', 'hover:bg-[#8e6a51]');
-                } else if (mode === 'signup') {
+                } else if (modeOrData === 'signup') {
                     currentAuthMode = 'signup';
                     document.getElementById('auth-modal-title').textContent = '회원가입';
                     document.getElementById('auth-submit-button').textContent = '회원가입';
                     document.getElementById('auth-submit-button').classList.remove('bg-[#A37E63]', 'hover:bg-[#8e6a51]');
                     document.getElementById('auth-submit-button').classList.add('bg-blue-500', 'hover:bg-blue-600');
-                } else if (mode === 'logout') {
+                } else if (modeOrData === 'logout') {
                     handleLogout();
                     return; // Don't open a modal for logout
                 }
             }
 
-            const formId = modalId === 'note-modal' ? 'note-form' : 'error-form';
+            const formId = modalId === 'note-modal' ? 'note-form' : (modalId === 'error-modal' ? 'error-form' : null);
             // Only reset if it's a form modal (not detail or confirm)
             if (formId) {
                 document.getElementById(formId).reset();
             }
 
-            if (mode && (modalId === 'note-modal' || modalId === 'error-modal')) { // For edit mode
+            if (modeOrData && (modalId === 'note-modal' || modalId === 'error-modal' || modalId === 'detail-modal')) { // For edit/detail mode
                  if (modalId === 'note-modal') {
-                    document.getElementById('note-id').value = mode.id; // 'mode' is actually 'data' here
-                    document.getElementById('note-subject').value = mode.subject;
-                    document.getElementById('note-topic').value = mode.topic;
-                    document.getElementById('note-keywords').value = mode.keywords;
-                    document.getElementById('note-content').value = mode.content;
-                    document.getElementById('note-book-page').value = mode.bookPage;
+                    document.getElementById('note-id').value = modeOrData.id;
+                    document.getElementById('note-subject').value = modeOrData.subject;
+                    document.getElementById('note-topic').value = modeOrData.topic;
+                    document.getElementById('note-keywords').value = modeOrData.keywords;
+                    document.getElementById('note-content').value = modeOrData.content;
+                    document.getElementById('note-book-page').value = modeOrData.bookPage;
                 } else if (modalId === 'error-modal') {
-                    document.getElementById('error-id').value = mode.id;
-                    document.getElementById('error-subject').value = mode.subject;
-                    document.getElementById('error-choice-summary').value = mode.choiceSummary;
-                    document.getElementById('error-mistake-point').value = mode.mistakePoint;
-                    document.getElementById('error-commentary').value = mode.commentary;
+                    document.getElementById('error-id').value = modeOrData.id;
+                    document.getElementById('error-subject').value = modeOrData.subject;
+                    document.getElementById('error-keywords').value = modeOrData.keywords; // NEW: Populate keywords for error note
+                    document.getElementById('error-choice-summary').value = modeOrData.choiceSummary;
+                    document.getElementById('error-mistake-point').value = modeOrData.mistakePoint;
+                    document.getElementById('error-commentary').value = modeOrData.commentary;
+                } else if (modalId === 'detail-modal') {
+                    // detail-modal handled by viewDetail function which populates #detail-content
+                    // Just open the modal
                 }
             } else { // Clear hidden IDs if opening for a new item
                  if (modalId === 'note-modal') document.getElementById('note-id').value = '';
@@ -657,6 +658,7 @@
             const errorId = document.getElementById('error-id').value;
             const errorData = {
                 subject: document.getElementById('error-subject').value,
+                keywords: document.getElementById('error-keywords').value, // NEW: Get keywords for error note
                 choiceSummary: document.getElementById('error-choice-summary').value,
                 mistakePoint: document.getElementById('error-mistake-point').value,
                 commentary: document.getElementById('error-commentary').value,
@@ -802,16 +804,22 @@
                     : (window.db.errors || []).find(d => d.id === item.itemId);
                 if (!data) return '';
 
-                const title = item.type === 'note' ? data.topic : data.choiceSummary;
+                // Determine the title based on item type
+                let displayTitle;
+                if (item.type === 'note') {
+                    displayTitle = data.topic;
+                } else if (item.type === 'error') {
+                    displayTitle = data.keywords || data.choiceSummary; // Prefer keywords, fallback to choiceSummary
+                }
 
                 return `
-                    <div class="bg-white p-4 rounded-lg shadow-sm flex justify-between items-center">
+                    <div class="bg-white p-4 rounded-lg shadow-sm flex justify-between items-center cursor-pointer" onclick="window.viewDetail('${item.type}', '${item.itemId}')">
                         <div>
                             <span class="text-xs font-semibold ${item.type === 'note' ? 'text-blue-500 bg-blue-100' : 'text-red-500 bg-red-100'} px-2 py-1 rounded-full">${item.type === 'note' ? '노트' : '오답'}</span>
-                            <span class="ml-3 font-medium">${title}</span>
+                            <span class="ml-3 font-medium">${displayTitle}</span>
                             <span class="text-sm text-gray-500 ml-2">(${data.subject}) - ${item.reviewCount}회 복습</span>
                         </div>
-                        <button onclick="window.markAsReviewed('${item.id}')" class="px-3 py-1 bg-green-500 text-white text-sm rounded-lg hover:bg-green-600 transition">복습 완료</button>
+                        <button onclick="event.stopPropagation(); window.markAsReviewed('${item.id}')" class="px-3 py-1 bg-green-500 text-white text-sm rounded-lg hover:bg-green-600 transition">복습 완료</button>
                     </div>
                 `;
             }).join('');
@@ -865,15 +873,16 @@
             if (type === 'note') {
                 html += `
                     <p><strong class="w-24 inline-block">논점:</strong> ${data.topic}</p>
-                    <p><strong class="w-24 inline-block">키워드:</strong> <span class="bg-gray-100 px-2 py-1 rounded">${data.keywords}</span></p>
+                    <p><strong class="w-24 inline-block">키워드:</strong> <span class="bg-gray-100 px-2 py-1 rounded">${data.keywords || 'N/A'}</span></p>
                     <p><strong class="w-24 inline-block">기본서 페이지:</strong> ${data.bookPage || 'N/A'}</p>
                     <div class="mt-4 p-4 bg-gray-50 rounded-md">
                         <strong class="block mb-2">정리 내용:</strong>
                         <p class="whitespace-pre-wrap">${data.content}</p>
                     </div>
                 `;
-            } else {
+            } else { // type === 'error'
                  html += `
+                    <p><strong class="w-24 inline-block">키워드:</strong> <span class="bg-gray-100 px-2 py-1 rounded">${data.keywords || 'N/A'}</span></p> <!-- NEW: Display keywords for error note -->
                     <p><strong class="w-24 inline-block">선택지:</strong> ${data.choiceSummary}</p>
                     <div class="mt-4 p-4 bg-red-50 rounded-md">
                         <strong class="block mb-2 text-red-700">착오 포인트:</strong>
@@ -968,3 +977,4 @@
     </script>
 </body>
 </html>
+
