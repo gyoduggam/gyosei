@@ -6,6 +6,146 @@
     <title>행정서사 합격 관리 대시보드</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <!-- Firebase SDKs -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, getDoc, addDoc, setDoc, updateDoc, deleteDoc, onSnapshot, collection, query, where, getDocs } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Firebase configuration (provided by Canvas environment)
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        let app;
+        let dbInstance;
+        let authInstance;
+        let currentUserId = null;
+        let isAuthReady = false;
+
+        // Global data store - populated by Firestore snapshots
+        // THIS IS THE LOCAL CACHE FOR FIRESTORE DATA
+        window.db = {
+            notes: [],
+            errors: [],
+            reviewSchedule: [],
+            reviewHistory: {}
+        };
+
+        window.appReady = new Promise(resolve => {
+            document.addEventListener('DOMContentLoaded', async () => {
+                try {
+                    app = initializeApp(firebaseConfig);
+                    dbInstance = getFirestore(app);
+                    authInstance = getAuth(app);
+
+                    // IMPORTANT: Do NOT overwrite window.db with dbInstance.
+                    // window.db is meant to be the local data cache.
+                    window.auth = authInstance; // Make auth globally available
+                    window.appId = appId;
+                    window.firebaseConfig = firebaseConfig; // Make firebaseConfig globally available
+                    // window.currentUserId will be set by onAuthStateChanged
+
+                    // Set up auth state observer
+                    onAuthStateChanged(authInstance, async (user) => {
+                        if (user) {
+                            currentUserId = user.uid;
+                            window.currentUserId = currentUserId; // Update global currentUserId
+                            document.getElementById('user-id-display').textContent = `사용자 ID: ${currentUserId}`;
+                            console.log("Firebase Auth: User signed in with UID:", currentUserId);
+                            isAuthReady = true;
+                            resolve(); // Resolve promise when auth is ready
+                            initializeFirestoreListeners(); // Start listening to Firestore
+                        } else {
+                            currentUserId = null;
+                            window.currentUserId = null; // Clear global currentUserId
+                            document.getElementById('user-id-display').textContent = `로그인 중...`;
+                            console.log("Firebase Auth: No user signed in. Attempting sign-in...");
+                            try {
+                                if (initialAuthToken) {
+                                    await signInWithCustomToken(authInstance, initialAuthToken);
+                                    console.log("Firebase Auth: Signed in with custom token.");
+                                } else {
+                                    await signInAnonymously(authInstance);
+                                    console.log("Firebase Auth: Signed in anonymously.");
+                                }
+                            } catch (signInError) {
+                                console.error("Firebase Auth: Sign-in failed:", signInError);
+                                // Fallback to a random ID if sign-in fails (though data won't persist if security rules require auth)
+                                currentUserId = crypto.randomUUID();
+                                window.currentUserId = currentUserId;
+                                document.getElementById('user-id-display').textContent = `사용자 ID (비로그인): ${currentUserId}`;
+                                isAuthReady = true;
+                                resolve(); // Resolve even if anonymous sign-in fails
+                            }
+                        }
+                    });
+
+                } catch (e) {
+                    console.error("Firebase initialization failed:", e);
+                    document.getElementById('loading-spinner').innerHTML = `<p class="text-red-500">Firebase 초기화 실패. 콘솔을 확인하세요.</p>`;
+                    // Resolve promise even on error to allow UI to load partially
+                    isAuthReady = true;
+                    resolve();
+                }
+            });
+        });
+
+        // Global functions for Firebase operations, callable from main script
+        // These now correctly use dbInstance (the Firestore client)
+        window.getNotesCollectionRef = () => collection(dbInstance, `artifacts/${appId}/users/${currentUserId}/notes`);
+        window.getErrorsCollectionRef = () => collection(dbInstance, `artifacts/${appId}/users/${currentUserId}/errors`);
+        window.getReviewScheduleCollectionRef = () => collection(dbInstance, `artifacts/${appId}/users/${currentUserId}/reviewSchedule`);
+        window.getReviewHistoryDocRef = () => doc(dbInstance, `artifacts/${appId}/users/${currentUserId}/appData/reviewHistoryDoc`);
+
+        async function initializeFirestoreListeners() {
+            if (!isAuthReady || !currentUserId) {
+                console.log("Auth not ready or userId not set. Cannot initialize Firestore listeners.");
+                return;
+            }
+
+            // Listen for notes
+            onSnapshot(window.getNotesCollectionRef(), (snapshot) => {
+                const notesData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                window.db.notes = notesData; // Update the global data cache
+                console.log("Notes loaded from Firestore:", notesData);
+                window.renderNotesList(); // Re-render notes list
+                window.renderCharts(); // Re-render charts
+            }, (error) => console.error("Error listening to notes:", error));
+
+            // Listen for errors
+            onSnapshot(window.getErrorsCollectionRef(), (snapshot) => {
+                const errorsData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                window.db.errors = errorsData; // Update the global data cache
+                console.log("Errors loaded from Firestore:", errorsData);
+                window.renderErrorsList(); // Re-render errors list
+                window.renderCharts(); // Re-render charts
+            }, (error) => console.error("Error listening to errors:", error));
+
+            // Listen for review schedule
+            onSnapshot(window.getReviewScheduleCollectionRef(), (snapshot) => {
+                const reviewScheduleData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                window.db.reviewSchedule = reviewScheduleData; // Update the global data cache
+                console.log("Review Schedule loaded from Firestore:", reviewScheduleData);
+                window.renderTodayReview(); // Re-render today's review
+            }, (error) => console.error("Error listening to review schedule:", error));
+
+            // Listen for review history
+            onSnapshot(window.getReviewHistoryDocRef(), (docSnapshot) => {
+                if (docSnapshot.exists()) {
+                    window.db.reviewHistory = docSnapshot.data().history || {}; // Update the global data cache
+                    console.log("Review History loaded from Firestore:", window.db.reviewHistory);
+                } else {
+                    window.db.reviewHistory = {}; // Initialize empty if document doesn't exist
+                    console.log("Review History document does not exist, initializing empty.");
+                }
+                window.renderCharts(); // Re-render charts
+            }, (error) => console.error("Error listening to review history:", error));
+
+            // Hide loading spinner once data is potentially ready
+            document.getElementById('loading-spinner').classList.add('hidden');
+        }
+    </script>
     <!-- Chosen Palette: Calm Focus -->
     <!-- Application Structure Plan: 이 어플리케이션은 사용자의 일일 학습 흐름에 최적화된 '대시보드 중심 구조'로 설계되었습니다. 메인 화면에서는 '오늘의 복습' 항목을 최우선으로 보여주어 매일 해야 할 가장 중요한 작업을 명확히 제시합니다. 하단에는 학습 진행 상황을 직관적으로 파악할 수 있는 차트들을 배치하여 동기를 부여합니다. 사용자는 상단 탭을 통해 언제든지 '단권화 노트'나 '오답 노트'의 전체 목록을 조회하거나 새로운 내용을 추가할 수 있습니다. 이는 보고서의 선형적 구조를 따르기보다, '오늘 할 일 확인 → 학습 수행 → 진행 상황 점검 → 기록 및 관리'라는 실제 학습 사이클에 맞춘 사용자 중심의 비선형적이고 효율적인 구조입니다. -->
     <!-- Visualization & Content Choices:
@@ -23,11 +163,22 @@
         .tab-button.active { color: #A37E63; border-color: #A37E63; font-weight: 600; }
         .modal-backdrop { background-color: rgba(0,0,0,0.5); }
         .modal-content-area {
-            max-height: 80vh; /* 화면 높이의 80%를 넘지 않도록 제한 */
-            overflow-y: auto; /* 내용이 넘치면 스크롤바 생성 */
-            padding-right: 1rem; /* 스크롤바 때문에 내용이 잘리는 것 방지 */
+            max-height: 80vh;
+            overflow-y: auto;
+            padding-right: 1rem;
         }
         .scroll-area { max-height: calc(100vh - 250px); }
+        .loading-spinner {
+            border: 4px solid rgba(0, 0, 0, 0.1);
+            border-left-color: #A37E63;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
     </style>
     <link rel="stylesheet" as="style" crossorigin href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/static/pretendard.min.css" />
 </head>
@@ -40,10 +191,17 @@
         <header class="text-center mb-6">
             <h1 class="text-3xl md:text-4xl font-bold text-[#A37E63]">행정서사 합격 관리 시스템</h1>
             <p id="d-day-counter" class="text-lg text-gray-600 mt-2"></p>
+            <p id="user-id-display" class="text-sm text-gray-500 mt-1">로그인 중...</p>
         </header>
 
+        <!-- Loading Spinner -->
+        <div id="loading-spinner" class="fixed inset-0 bg-white bg-opacity-75 flex items-center justify-center z-50">
+            <div class="loading-spinner"></div>
+            <p class="ml-3 text-lg text-[#A37E63]">데이터 로드 중...</p>
+        </div>
+
         <!-- Main Content -->
-        <main>
+        <main id="main-content" class="hidden">
             <!-- Navigation Tabs -->
             <div class="mb-6 border-b border-gray-200">
                 <nav class="flex -mb-px space-x-6" aria-label="Tabs">
@@ -89,7 +247,7 @@
                 <!-- Notes -->
                 <div id="notes" class="hidden space-y-4">
                     <div class="flex justify-between items-center">
-                        <h2 class="text-2xl font-semibold text-[#B5947C]">� 단권화 노트 목록</h2>
+                        <h2 class="text-2xl font-semibold text-[#B5947C]">📚 단권화 노트 목록</h2>
                         <button onclick="openModal('note-modal')" class="bg-[#A37E63] text-white px-4 py-2 rounded-lg shadow hover:bg-[#8e6a51] transition">새 노트 추가</button>
                     </div>
                     <div id="notes-list" class="scroll-area overflow-y-auto bg-white/50 p-4 rounded-lg"></div>
@@ -164,9 +322,23 @@
         </div>
     </div>
 
-    <script>
-        // --- DATA & STATE MANAGEMENT ---
-        let db = {
+    <script type="module">
+        // Import Firebase functions from the SDKs loaded in <head>
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, getDoc, addDoc, setDoc, updateDoc, deleteDoc, onSnapshot, collection, query, where, getDocs } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Firebase variables will be populated from window scope set by the initial script
+        let dbInstance;
+        let authInstance;
+        let currentUserId;
+        let appId;
+        // Access firebaseConfig from window scope
+        let firebaseConfig; 
+
+        // Global data store - populated by Firestore snapshots
+        // THIS IS THE LOCAL CACHE FOR FIRESTORE DATA
+        window.db = {
             notes: [],
             errors: [],
             reviewSchedule: [],
@@ -177,16 +349,28 @@
         const CHART_COLORS = ['#B5947C', '#C8AB99', '#DBC3B5', '#E9DCD2', '#F1EAE4'];
         let charts = {};
 
-        // --- CORE APP LOGIC ---
-        document.addEventListener('DOMContentLoaded', () => {
-            loadData();
-            setupDDayCounter();
-            renderAll();
+        // Wait for Firebase to be ready before proceeding
+        window.appReady.then(() => {
+            // dbInstance, authInstance, currentUserId, appId are already set globally by the first script tag
+            firebaseConfig = window.firebaseConfig; // Get firebaseConfig from window scope
+            dbInstance = getFirestore(initializeApp(firebaseConfig)); // Ensure dbInstance is the Firestore client
+            authInstance = getAuth(initializeApp(firebaseConfig)); // Ensure authInstance is the Auth client
+            currentUserId = window.currentUserId;
+            appId = window.appId;
+            console.log("Main script: Firebase is ready, currentUserId:", currentUserId, "appId:", appId);
 
+            // Hide loading spinner and show main content
+            document.getElementById('loading-spinner').classList.add('hidden');
+            document.getElementById('main-content').classList.remove('hidden');
+
+            setupDDayCounter();
+            renderAll(); // Initial render with potentially loaded data
+            
             document.getElementById('note-form').addEventListener('submit', handleNoteFormSubmit);
             document.getElementById('error-form').addEventListener('submit', handleErrorFormSubmit);
         });
 
+        // --- CORE APP LOGIC ---
         function setupDDayCounter() {
             const examDate = new Date('2025-11-09T00:00:00');
             const today = new Date();
@@ -210,66 +394,6 @@
             ['dashboard', 'notes', 'errors'].forEach(id => {
                 document.getElementById(id).classList.toggle('hidden', id !== tabName);
             });
-        }
-
-        // --- DATA PERSISTENCE (LocalStorage) ---
-        function saveData() {
-            try {
-                localStorage.setItem('studyDashboardData', JSON.stringify(db));
-                console.log('데이터가 로컬 스토리지에 성공적으로 저장되었습니다:', db);
-            } catch (e) {
-                console.error('로컬 스토리지 저장 실패:', e);
-            }
-        }
-
-        function loadData() {
-            try {
-                const data = localStorage.getItem('studyDashboardData');
-                if (data) {
-                    db = JSON.parse(data);
-                    console.log('데이터가 로컬 스토리지에서 성공적으로 로드되었습니다:', db);
-                    // Ensure all necessary arrays/objects exist if they weren't explicitly saved
-                    db.notes = db.notes || [];
-                    db.errors = db.errors || [];
-                    db.reviewSchedule = db.reviewSchedule || [];
-                    db.reviewHistory = db.reviewHistory || {};
-                } else {
-                    console.log('로컬 스토리지에 데이터가 없습니다. 초기 더미 데이터로 시작합니다.');
-                    db = {
-                        notes: [
-                            { id: 1, subject: '행정법', topic: '행정지도', keywords: '비구속적, 임의성', content: '행정절차법 제48조에 규정. 비권력적 사실행위. 행정지도는 행정기관이 그 소관 사무 범위에서 일정한 행위를 하거나 하지 아니하도록 지도, 권고, 조언 등을 하는 비권력적 사실행위이다. 행정절차법 제48조에 규정되어 있으며, 상대방의 임의적 협력을 요건으로 한다. 이는 강제성을 띠지 않으며, 법적 구속력을 가지지 않는다는 특징이 있다. 따라서 행정지도로 인해 어떤 손해가 발생하더라도 원칙적으로 법적 쟁송의 대상이 되지 않는다. 그러나 예외적으로 행정지도가 사실상 강제력을 띠거나, 법적 근거 없이 국민의 권익을 침해하는 경우 등에는 법적 분쟁의 대상이 될 수 있다. 예를 들어, 행정기관이 특정 사업자에게 부당하게 특정 행위를 요구하고, 이를 따르지 않을 경우 불이익을 주겠다고 위협하는 경우 등은 행정지도의 한계를 벗어나는 행위로 볼 수 있다. 이러한 경우 피해자는 해당 행정지도에 대해 행정심판이나 행정소송을 통해 권리 구제를 받을 수 있다. 또한, 행정지도는 행정의 효율성을 높이고 국민의 자발적인 협력을 유도하기 위한 수단이지만, 그 남용은 국민의 권익을 침해할 우려가 있으므로 신중하게 이루어져야 한다. 따라서 행정기관은 행정지도를 함에 있어서 그 목적을 명확히 하고, 상대방의 의사에 반하여 부당하게 강요해서는 안 된다는 점을 명심해야.', bookPage: 50, createdAt: new Date('2025-06-10').toISOString() },
-                            { id: 2, subject: '헌법', topic: '기본권 제한', keywords: '과잉금지원칙', content: '목적의 정당성, 수단의 적합성, 침해의 최소성, 법익의 균형성.', bookPage: 25, createdAt: new Date('2025-06-12').toISOString() },
-                        ],
-                        errors: [
-                            { id: 1, subject: '민법', choiceSummary: '의사표시는 항상 발신 시에 효력이 발생한다.', mistakePoint: '원칙(도달주의)과 예외(발신주의)를 혼동함.', commentary: '격지자 간 계약의 승낙 통지만 발신주의.', createdAt: new Date('2025-06-13').toISOString() },
-                        ],
-                        reviewSchedule: [
-                            { type: 'note', id: 1, reviewCount: 1, nextReviewDate: '2025-06-11' },
-                            { type: 'note', id: 2, reviewCount: 0, nextReviewDate: '2025-06-12' },
-                            { type: 'error', id: 1, reviewCount: 0, nextReviewDate: '2025-06-13' },
-                        ],
-                        reviewHistory: { '2025-06-11': 1 }
-                    };
-                }
-            } catch (e) {
-                console.error('로컬 스토리지 로드 실패 또는 데이터 파싱 오류:', e);
-                // Fallback to initial dummy data if loading fails entirely
-                 db = {
-                    notes: [
-                        { id: 1, subject: '행정법', topic: '행정지도', keywords: '비구속적, 임의성', content: '행정절차법 제48조에 규정. 비권력적 사실행위. 행정지도는 행정기관이 그 소관 사무 범위에서 일정한 행위를 하거나 하지 아니하도록 지도, 권고, 조언 등을 하는 비권력적 사실행위이다. 행정절차법 제48조에 규정되어 있으며, 상대방의 임의적 협력을 요건으로 한다. 이는 강제성을 띠지 않으며, 법적 구속력을 가지지 않는다는 특징이 있다. 따라서 행정지도로 인해 어떤 손해가 발생하더라도 원칙적으로 법적 쟁송의 대상이 되지 않는다. 그러나 예외적으로 행정지도가 사실상 강제력을 띠거나, 법적 근거 없이 국민의 권익을 침해하는 경우 등에는 법적 분쟁의 대상이 될 수 있다. 예를 들어, 행정기관이 특정 사업자에게 부당하게 특정 행위를 요구하고, 이를 따르지 않을 경우 불이익을 주겠다고 위협하는 경우 등은 행정지도의 한계를 벗어나는 행위로 볼 수 있다. 이러한 경우 피해자는 해당 행정지도에 대해 행정심판이나 행정소송을 통해 권리 구제를 받을 수 있다. 또한, 행정지도는 행정의 효율성을 높이고 국민의 자발적인 협력을 유도하기 위한 수단이지만, 그 남용은 국민의 권익을 침해할 우려가 있으므로 신중하게 이루어져야 한다. 따라서 행정기관은 행정지도를 함에 있어서 그 목적을 명확히 하고, 상대방의 의사에 반하여 부당하게 강요해서는 안 된다는 점을 명심해야.', bookPage: 50, createdAt: new Date('2025-06-10').toISOString() },
-                        { id: 2, subject: '헌법', topic: '기본권 제한', keywords: '과잉금지원칙', content: '목적의 정당성, 수단의 적합성, 침해의 최소성, 법익의 균형성.', bookPage: 25, createdAt: new Date('2025-06-12').toISOString() },
-                    ],
-                    errors: [
-                        { id: 1, subject: '민법', choiceSummary: '의사표시는 항상 발신 시에 효력이 발생한다.', mistakePoint: '원칙(도달주의)과 예외(발신주의)를 혼동함.', commentary: '격지자 간 계약의 승낙 통지만 발신주의.', createdAt: new Date('2025-06-13').toISOString() },
-                    ],
-                    reviewSchedule: [
-                        { type: 'note', id: 1, reviewCount: 1, nextReviewDate: '2025-06-11' },
-                        { type: 'note', id: 2, reviewCount: 0, nextReviewDate: '2025-06-12' },
-                        { type: 'error', id: 1, reviewCount: 0, nextReviewDate: '2025-06-13' },
-                        ],
-                    reviewHistory: { '2025-06-11': 1 }
-                };
-            }
         }
 
         // --- MODAL HANDLING ---
@@ -306,108 +430,154 @@
             document.getElementById(modalId).classList.remove('flex');
         }
 
-        // --- FORM SUBMISSION HANDLERS ---
-        function handleNoteFormSubmit(e) {
+        // --- FIRESTORE OPERATIONS ---
+        async function handleNoteFormSubmit(e) {
             e.preventDefault();
-            const id = document.getElementById('note-id').value;
+            if (!currentUserId) { console.error("No user ID available for Firestore operation."); return; }
+
+            const noteId = document.getElementById('note-id').value;
             const noteData = {
-                id: id ? parseInt(id) : Date.now(),
                 subject: document.getElementById('note-subject').value,
                 topic: document.getElementById('note-topic').value,
                 keywords: document.getElementById('note-keywords').value,
                 content: document.getElementById('note-content').value,
-                bookPage: document.getElementById('note-book-page').value,
-                createdAt: id ? db.notes.find(n=>n.id==id).createdAt : new Date().toISOString()
+                bookPage: document.getElementById('note-book-page').value ? parseInt(document.getElementById('note-book-page').value) : null,
+                createdAt: noteId ? window.db.notes.find(n => n.id === noteId)?.createdAt : new Date().toISOString()
             };
 
-            if (id) { // Update
-                db.notes = db.notes.map(n => n.id == id ? noteData : n);
-                console.log('노트가 수정되었습니다:', noteData);
-            } else { // Create
-                db.notes.push(noteData);
-                addReviewScheduleItem('note', noteData.id, noteData.createdAt);
-                console.log('새 노트가 추가되었습니다:', noteData);
+            try {
+                if (noteId) { // Update existing note
+                    await setDoc(doc(window.getNotesCollectionRef(), noteId), noteData);
+                    console.log('노트가 Firestore에서 수정되었습니다:', noteId);
+                } else { // Add new note
+                    const newNoteRef = await addDoc(window.getNotesCollectionRef(), { ...noteData, createdAt: new Date().toISOString() });
+                    console.log('새 노트가 Firestore에 추가되었습니다:', newNoteRef.id);
+                    await addReviewScheduleItem('note', newNoteRef.id, noteData.createdAt); // Add to review schedule
+                }
+                closeModal('note-modal');
+            } catch (e) {
+                console.error("노트 저장 중 오류 발생:", e);
             }
-
-            saveData();
-            renderAll();
-            closeModal('note-modal');
         }
 
-        function handleErrorFormSubmit(e) {
+        async function handleErrorFormSubmit(e) {
             e.preventDefault();
-            const id = document.getElementById('error-id').value;
+            if (!currentUserId) { console.error("No user ID available for Firestore operation."); return; }
+
+            const errorId = document.getElementById('error-id').value;
             const errorData = {
-                id: id ? parseInt(id) : Date.now(),
                 subject: document.getElementById('error-subject').value,
                 choiceSummary: document.getElementById('error-choice-summary').value,
                 mistakePoint: document.getElementById('error-mistake-point').value,
                 commentary: document.getElementById('error-commentary').value,
-                createdAt: id ? db.errors.find(err=>err.id==id).createdAt : new Date().toISOString()
+                createdAt: errorId ? window.db.errors.find(err => err.id === errorId)?.createdAt : new Date().toISOString()
             };
 
-            if (id) { // Update
-                db.errors = db.errors.map(err => err.id == id ? errorData : err);
-                console.log('오답 노트가 수정되었습니다:', errorData);
-            } else { // Create
-                db.errors.push(errorData);
-                addReviewScheduleItem('error', errorData.id, errorData.createdAt);
-                console.log('새 오답 노트가 추가되었습니다:', errorData);
+            try {
+                if (errorId) { // Update existing error
+                    await setDoc(doc(window.getErrorsCollectionRef(), errorId), errorData);
+                    console.log('오답 노트가 Firestore에서 수정되었습니다:', errorId);
+                } else { // Add new error
+                    const newErrorRef = await addDoc(window.getErrorsCollectionRef(), { ...errorData, createdAt: new Date().toISOString() });
+                    console.log('새 오답 노트가 Firestore에 추가되었습니다:', newErrorRef.id);
+                    await addReviewScheduleItem('error', newErrorRef.id, errorData.createdAt); // Add to review schedule
+                }
+                closeModal('error-modal');
+            } catch (e) {
+                console.error("오답 노트 저장 중 오류 발생:", e);
             }
-
-            saveData();
-            renderAll();
-            closeModal('error-modal');
         }
 
-        // --- REVIEW LOGIC ---
-        function addReviewScheduleItem(type, id, createdAt) {
+        async function addReviewScheduleItem(type, itemId, createdAt) {
+            if (!currentUserId) { console.error("No user ID available for Firestore operation."); return; }
             const today = new Date().toISOString().split('T')[0];
-            db.reviewSchedule.push({
-                type: type,
-                id: id,
-                createdAt: createdAt,
-                reviewCount: 0,
-                nextReviewDate: today
-            });
-            console.log('복습 스케줄에 항목이 추가되었습니다:', {type, id, nextReviewDate: today});
+            try {
+                await addDoc(window.getReviewScheduleCollectionRef(), {
+                    type: type,
+                    itemId: itemId, // Use itemId to prevent conflict with Firestore's doc.id
+                    createdAt: createdAt,
+                    reviewCount: 0,
+                    nextReviewDate: today
+                });
+                console.log('복습 스케줄에 항목이 추가되었습니다:', {type, itemId, nextReviewDate: today});
+            } catch (e) {
+                console.error("복습 스케줄 추가 중 오류 발생:", e);
+            }
         }
 
-        function markAsReviewed(type, id) {
-            const itemIndex = db.reviewSchedule.findIndex(item => item.type === type && item.id === id);
-            if (itemIndex === -1) return;
+        async function markAsReviewed(scheduleId) {
+            if (!currentUserId) { console.error("No user ID available for Firestore operation."); return; }
 
-            const item = db.reviewSchedule[itemIndex];
-            item.reviewCount += 1;
+            const item = window.db.reviewSchedule.find(s => s.id === scheduleId);
+            if (!item) { console.error("Review schedule item not found."); return; }
 
+            const newReviewCount = item.reviewCount + 1;
             const reviewIntervals = [1, 3, 7, 14, 30]; // Days from creation date
-            const nextInterval = reviewIntervals[item.reviewCount-1];
 
-            if(nextInterval) {
+            let nextReviewDate;
+            if(newReviewCount <= reviewIntervals.length) {
                 const creationDate = new Date(item.createdAt);
                 const nextDate = new Date(creationDate);
-                nextDate.setDate(creationDate.getDate() + nextInterval);
-                item.nextReviewDate = nextDate.toISOString().split('T')[0];
+                nextDate.setDate(creationDate.getDate() + reviewIntervals[newReviewCount - 1]);
+                nextReviewDate = nextDate.toISOString().split('T')[0];
             } else {
-                // After 30 days, just push it a month forward from last review
-                const lastReviewDate = new Date();
+                const lastReviewDate = new Date(); // From today
                 lastReviewDate.setDate(lastReviewDate.getDate() + 30);
-                item.nextReviewDate = lastReviewDate.toISOString().split('T')[0];
+                nextReviewDate = lastReviewDate.toISOString().split('T')[0];
             }
 
-            const todayStr = new Date().toISOString().split('T')[0];
-            db.reviewHistory[todayStr] = (db.reviewHistory[todayStr] || 0) + 1;
+            try {
+                await updateDoc(doc(window.getReviewScheduleCollectionRef(), scheduleId), {
+                    reviewCount: newReviewCount,
+                    nextReviewDate: nextReviewDate
+                });
+                console.log('항목 복습 완료 및 스케줄 업데이트:', {scheduleId, newReviewCount, nextReviewDate});
 
-            console.log('항목 복습 완료 및 스케줄 업데이트:', item);
-            saveData();
-            renderAll();
+                // Update review history in Firestore
+                const todayStr = new Date().toISOString().split('T')[0];
+                const updatedReviewHistory = { ...window.db.reviewHistory };
+                updatedReviewHistory[todayStr] = (updatedReviewHistory[todayStr] || 0) + 1;
+
+                await setDoc(window.getReviewHistoryDocRef(), { history: updatedReviewHistory }, { merge: true });
+                console.log('복습 기록이 Firestore에 업데이트되었습니다.');
+
+            } catch (e) {
+                console.error("복습 완료 처리 중 오류 발생:", e);
+            }
         }
 
-        // --- RENDER FUNCTIONS ---
-        function renderTodayReview() {
+        async function deleteItem(type, docId) {
+            if (!confirm('정말로 삭제하시겠습니까? 관련된 복습 스케줄도 함께 삭제됩니다.')) return;
+            if (!currentUserId) { console.error("No user ID available for Firestore operation."); return; }
+
+            try {
+                // Delete the main item
+                if (type === 'note') {
+                    await deleteDoc(doc(window.getNotesCollectionRef(), docId));
+                } else if (type === 'error') {
+                    await deleteDoc(doc(window.getErrorsCollectionRef(), docId));
+                }
+                console.log(`${type} 항목이 Firestore에서 삭제되었습니다:`, docId);
+
+                // Find and delete related review schedule items
+                const q = query(window.getReviewScheduleCollectionRef(), where('type', '==', type), where('itemId', '==', docId));
+                const querySnapshot = await getDocs(q);
+                querySnapshot.forEach(async (docRef) => {
+                    await deleteDoc(docRef.ref);
+                    console.log('관련 복습 스케줄 항목도 삭제되었습니다:', docRef.id);
+                });
+
+            } catch (e) {
+                console.error("항목 삭제 중 오류 발생:", e);
+            }
+        }
+
+        // --- RENDER FUNCTIONS (now triggered by Firestore snapshots) ---
+        window.renderTodayReview = function() {
             const listEl = document.getElementById('today-review-list');
             const today = new Date().toISOString().split('T')[0];
-            const itemsToReview = db.reviewSchedule.filter(item => item.nextReviewDate <= today);
+            // Ensure window.db.reviewSchedule is an array before filtering
+            const itemsToReview = (window.db.reviewSchedule || []).filter(item => item.nextReviewDate <= today);
 
             if (itemsToReview.length === 0) {
                 listEl.innerHTML = `<div class="text-center text-gray-500 p-4 bg-gray-50 rounded-lg">오늘 복습할 항목이 없습니다.</div>`;
@@ -416,9 +586,9 @@
 
             listEl.innerHTML = itemsToReview.map(item => {
                 const data = item.type === 'note'
-                    ? db.notes.find(d => d.id === item.id)
-                    : db.errors.find(d => d.id === item.id);
-                if (!data) return '';
+                    ? (window.db.notes || []).find(d => d.id === item.itemId) // Use itemId here
+                    : (window.db.errors || []).find(d => d.id === item.itemId); // Use itemId here
+                if (!data) return ''; // If data not found, skip rendering
 
                 const title = item.type === 'note' ? data.topic : data.choiceSummary;
 
@@ -429,17 +599,17 @@
                             <span class="ml-3 font-medium">${title}</span>
                             <span class="text-sm text-gray-500 ml-2">(${data.subject}) - ${item.reviewCount}회 복습</span>
                         </div>
-                        <button onclick="markAsReviewed('${item.type}', ${item.id})" class="px-3 py-1 bg-green-500 text-white text-sm rounded-lg hover:bg-green-600 transition">복습 완료</button>
+                        <button onclick="markAsReviewed('${item.id}')" class="px-3 py-1 bg-green-500 text-white text-sm rounded-lg hover:bg-green-600 transition">복습 완료</button>
                     </div>
                 `;
             }).join('');
-        }
+        };
 
-        function renderList(type) {
+        window.renderList = function(type) {
             const listEl = document.getElementById(`${type}s-list`);
-            const dataList = db[`${type}s`];
+            const dataList = window.db[`${type}s`]; // This relies on window.db[type + 's'] being an array
 
-            if (dataList.length === 0) {
+            if (!dataList || dataList.length === 0) { // Check if dataList is null/undefined or empty
                 listEl.innerHTML = `<div class="text-center text-gray-500 p-4">아직 추가된 ${type === 'note' ? '노트가' : '오답이'} 없습니다.</div>`;
                 return;
             }
@@ -451,36 +621,27 @@
                         <div class="flex justify-between items-start">
                            <div class="flex-1">
                                <p class="font-semibold">${title}</p>
-                               <p class="text-sm text-gray-500">${data.subject} | 생성: ${new Date(data.createdAt).toLocaleDateString()}</p>
+                               <p class="text-sm text-gray-500">${new Date(data.createdAt).toLocaleDateString()} | ${data.subject}</p>
                            </div>
                            <div class="flex space-x-2 ml-2">
-                               <button onclick="viewDetail('${type}', ${data.id})" class="px-3 py-1 bg-blue-100 text-blue-600 text-xs rounded-md hover:bg-blue-200">보기</button>
-                               <button onclick="openModal('${type}-modal', db.${type}s.find(d=>d.id==${data.id}))" class="px-3 py-1 bg-yellow-100 text-yellow-600 text-xs rounded-md hover:bg-yellow-200">수정</button>
-                               <button onclick="deleteItem('${type}', ${data.id})" class="px-3 py-1 bg-red-100 text-red-600 text-xs rounded-md hover:bg-red-200">삭제</button>
+                               <button onclick="viewDetail('${type}', '${data.id}')" class="px-3 py-1 bg-blue-100 text-blue-600 text-xs rounded-md hover:bg-blue-200">보기</button>
+                               <button onclick="openModal('${type}-modal', window.db.${type}s.find(d=>d.id==='${data.id}'))" class="px-3 py-1 bg-yellow-100 text-yellow-600 text-xs rounded-md hover:bg-yellow-200">수정</button>
+                               <button onclick="deleteItem('${type}', '${data.id}')" class="px-3 py-1 bg-red-100 text-red-600 text-xs rounded-md hover:bg-red-200">삭제</button>
                            </div>
                         </div>
                     </div>
                 `
             }).join('');
-        }
+        };
 
-        function renderNotesList() { renderList('note'); }
-        function renderErrorsList() { renderList('error'); }
+        window.renderNotesList = function() { window.renderList('note'); };
+        window.renderErrorsList = function() { window.renderList('error'); };
 
-        function deleteItem(type, id) {
-            if (!confirm('정말로 삭제하시겠습니까? 관련된 복습 스케줄도 함께 삭제됩니다.')) return;
-
-            db[`${type}s`] = db[`${type}s`].filter(item => item.id !== id);
-            db.reviewSchedule = db.reviewSchedule.filter(item => !(item.type === type && item.id === id));
-
-            console.log('항목이 삭제되었습니다:', {type, id});
-            saveData();
-            renderAll();
-        }
-
-        function viewDetail(type, id) {
-            const data = db[`${type}s`].find(d => d.id === id);
+        window.viewDetail = function(type, id) {
+            const data = (window.db[`${type}s`] || []).find(d => d.id === id); // Ensure array before find
             const contentEl = document.getElementById('detail-content');
+
+            if (!data) { contentEl.innerHTML = `<p class="text-red-500">데이터를 찾을 수 없습니다.</p>`; return; }
 
             let html = `
                 <h3 class="text-xl font-bold text-[#A37E63]">${type === 'note' ? '노트 상세' : '오답 상세'}</h3>
@@ -513,22 +674,22 @@
             }
             contentEl.innerHTML = html;
             openModal('detail-modal');
-        }
+        };
 
-        // --- CHART RENDERING ---
-        function renderCharts() {
+        window.renderCharts = function() {
             renderSubjectChart();
             renderErrorChart();
             renderReviewHistoryChart();
-        }
+        };
 
         function renderSubjectChart() {
             const ctx = document.getElementById('subjectChart').getContext('2d');
             const data = {
                 labels: SUBJECTS,
+                // Ensure window.db.notes is an array before filtering
                 datasets: [{
                     label: '과목별 노트 수',
-                    data: SUBJECTS.map(s => db.notes.filter(n => n.subject === s).length),
+                    data: SUBJECTS.map(s => (window.db.notes || []).filter(n => n.subject === s).length),
                     backgroundColor: CHART_COLORS,
                     borderColor: '#FDFBF7',
                     borderWidth: 2
@@ -547,9 +708,10 @@
             const ctx = document.getElementById('errorChart').getContext('2d');
             const data = {
                 labels: SUBJECTS,
+                // Ensure window.db.errors is an array before filtering
                 datasets: [{
                     label: '과목별 오답 수',
-                    data: SUBJECTS.map(s => db.errors.filter(e => e.subject === s).length),
+                    data: SUBJECTS.map(s => (window.db.errors || []).filter(e => e.subject === s).length),
                     backgroundColor: CHART_COLORS[0],
                 }]
             };
@@ -567,12 +729,13 @@
             const labels = [];
             const dataPoints = [];
             const today = new Date();
+            // Get data for the last 15 days
             for(let i=14; i>=0; i--) {
                 const date = new Date(today);
                 date.setDate(today.getDate() - i);
                 const dateString = date.toISOString().split('T')[0];
-                labels.push(`${date.getMonth()+1}/${date.getDate()}`);
-                dataPoints.push(db.reviewHistory[dateString] || 0);
+                // Ensure window.db.reviewHistory is an object before accessing properties
+                dataPoints.push((window.db.reviewHistory || {})[dateString] || 0);
             }
 
             const data = {
@@ -593,8 +756,6 @@
                 options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } } }
             });
         }
-
     </script>
 </body>
 </html>
-�
