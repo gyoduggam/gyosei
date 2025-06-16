@@ -836,7 +836,9 @@
             }
 
             listEl.innerHTML = dataList.map(data => {
-                const title = type === 'note' ? data.topic : data.choiceSummary;
+                // Modified: Use keywords for error notes, fallback to topic/choiceSummary
+                const title = (type === 'error' && data.keywords) ? data.keywords : (type === 'note' ? data.topic : data.choiceSummary);
+
                 return `
                     <div class="bg-white p-3 rounded-lg shadow-sm mb-2">
                         <div class="flex justify-between items-start">
