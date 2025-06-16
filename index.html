@@ -8,19 +8,19 @@
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <!-- Firebase SDKs -->
     <script type="module">
-        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { initializeApp, getApps, getApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
         import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-        import { getFirestore, doc, getDoc, addDoc, setDoc, updateDoc, deleteDoc, onSnapshot, collection, query, where, getDocs } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { getFirestore, doc, addDoc, setDoc, updateDoc, deleteDoc, onSnapshot, collection, query, where, getDocs } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
         // Firebase configuration (provided by Canvas environment)
         window.firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
         window.appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
         const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
 
-        // Initialize Firebase app and services globally ONCE
-        window.firebaseApp = initializeApp(window.firebaseConfig);
-        window.firestoreDb = getFirestore(window.firebaseApp);
-        window.firebaseAuth = getAuth(window.firebaseApp);
+        let app;
+        let dbInstance;
+        let authInstance;
+        window.currentUserId = null; // Global currentUserId, updated by auth state listener
 
         // Global data store - populated by Firestore snapshots (this remains the data cache)
         window.db = {
@@ -29,47 +29,58 @@
             reviewSchedule: [],
             reviewHistory: {}
         };
-        // Global currentUserId, updated by auth state listener
-        window.currentUserId = null;
-
-        let isAuthReady = false;
 
         window.appReady = new Promise(resolve => {
+            // Check if Firebase app is already initialized to avoid re-initialization warnings
+            if (!getApps().length) {
+                app = initializeApp(window.firebaseConfig);
+            } else {
+                app = getApp(); // Use the already initialized app
+            }
+            dbInstance = getFirestore(app);
+            authInstance = getAuth(app);
+
+            // Make Firebase instances and appId globally accessible
+            window.firestoreDb = dbInstance;
+            window.firebaseAuth = authInstance;
+
             // Set up auth state observer
-            onAuthStateChanged(window.firebaseAuth, async (user) => {
+            onAuthStateChanged(authInstance, async (user) => {
                 if (user) {
                     window.currentUserId = user.uid;
                     document.getElementById('user-id-display').textContent = `사용자 ID: ${window.currentUserId}`;
                     console.log("Firebase Auth: User signed in with UID:", window.currentUserId);
-                    isAuthReady = true;
-                    resolve(); // Resolve promise when auth is ready
                     initializeFirestoreListeners(); // Start listening to Firestore
+                    resolve(); // Resolve promise when auth is ready
                 } else {
                     window.currentUserId = null;
                     document.getElementById('user-id-display').textContent = `로그인 중...`;
                     console.log("Firebase Auth: No user signed in. Attempting sign-in...");
                     try {
                         if (initialAuthToken) {
-                            await signInWithCustomToken(window.firebaseAuth, initialAuthToken);
+                            await signInWithCustomToken(authInstance, initialAuthToken);
                             console.log("Firebase Auth: Signed in with custom token.");
                         } else {
-                            await signInAnonymously(window.firebaseAuth);
+                            await signInAnonymously(authInstance);
                             console.log("Firebase Auth: Signed in anonymously.");
                         }
                     } catch (signInError) {
                         console.error("Firebase Auth: Sign-in failed:", signInError);
                         // Fallback to a random ID if sign-in fails (though data won't persist if security rules require auth)
-                        window.currentUserId = crypto.randomUUID();
+                        window.currentUserId = crypto.randomUUID(); // Generate a local ID
                         document.getElementById('user-id-display').textContent = `사용자 ID (비로그인): ${window.currentUserId}`;
-                        isAuthReady = true;
-                        resolve(); // Resolve even if anonymous sign-in fails
+                        console.warn("Firebase Auth: Anonymous sign-in failed. Data will not persist across sessions or devices without proper authentication.");
+                    } finally { // Ensure listeners are initialized and promise resolves regardless of sign-in success/failure
+                        initializeFirestoreListeners(); // Still attempt listeners even with local ID
+                        resolve(); // Resolve even if sign-in fails
                     }
                 }
             }, (error) => {
                 console.error("Firebase Auth state change error:", error);
-                document.getElementById('loading-spinner').innerHTML = `<p class="text-red-500">인증 오류. 콘솔을 확인하세요.</p>`;
-                isAuthReady = true;
-                resolve(); // Resolve even on auth error
+                document.getElementById('loading-spinner').innerHTML = `<p class="text-red-500">인증 오류 발생. 콘솔을 확인하세요.</p>`;
+                window.currentUserId = crypto.randomUUID(); // Ensure a userId is set
+                initializeFirestoreListeners(); // Attempt listeners even on auth error
+                resolve(); // Always resolve the promise
             });
         });
 
@@ -80,10 +91,14 @@
         window.getReviewHistoryDocRef = () => doc(window.firestoreDb, `artifacts/${window.appId}/users/${window.currentUserId}/appData/reviewHistoryDoc`);
 
         async function initializeFirestoreListeners() {
-            if (!isAuthReady || !window.currentUserId) {
-                console.log("Auth not ready or userId not set. Cannot initialize Firestore listeners.");
-                return;
+            // This function focuses only on setting up Firestore listeners.
+            // It no longer handles UI visibility directly.
+            if (!window.currentUserId) {
+                console.warn("User ID not set when initializing Firestore listeners. Data operations may fail if security rules require authentication.");
+                // We don't return here. Listeners will attempt to set up.
             }
+
+            console.log("Firestore Listeners initializing for user:", window.currentUserId);
 
             // Listeners for data changes in Firestore
             onSnapshot(window.getNotesCollectionRef(), (snapshot) => {
@@ -116,9 +131,6 @@
                 }
                 window.renderCharts();
             }, (error) => console.error("Error listening to review history:", error));
-
-            document.getElementById('loading-spinner').classList.add('hidden');
-            document.getElementById('main-content').classList.remove('hidden');
         }
     </script>
     <!-- Chosen Palette: Calm Focus -->
@@ -180,13 +192,13 @@
             <!-- Navigation Tabs -->
             <div class="mb-6 border-b border-gray-200">
                 <nav class="flex -mb-px space-x-6" aria-label="Tabs">
-                    <button onclick="changeTab('dashboard')" class="tab-button whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm text-gray-500 hover:text-[#A37E63] hover:border-[#A37E63] active" data-tab="dashboard">
+                    <button onclick="window.changeTab('dashboard')" class="tab-button whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm text-gray-500 hover:text-[#A37E63] hover:border-[#A37E63] active" data-tab="dashboard">
                         대시보드
                     </button>
-                    <button onclick="changeTab('notes')" class="tab-button whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm text-gray-500 hover:text-[#A37E63] hover:border-[#A37E63]" data-tab="notes">
+                    <button onclick="window.changeTab('notes')" class="tab-button whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm text-gray-500 hover:text-[#A37E63] hover:border-[#A37E63]" data-tab="notes">
                         단권화 노트
                     </button>
-                    <button onclick="changeTab('errors')" class="tab-button whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm text-gray-500 hover:text-[#A37E63] hover:border-[#A37E63]" data-tab="errors">
+                    <button onclick="window.changeTab('errors')" class="tab-button whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm text-gray-500 hover:text-[#A37E63] hover:border-[#A37E63]" data-tab="errors">
                         오답 노트
                     </button>
                 </nav>
@@ -223,7 +235,7 @@
                 <div id="notes" class="hidden space-y-4">
                     <div class="flex justify-between items-center">
                         <h2 class="text-2xl font-semibold text-[#B5947C]">📚 단권화 노트 목록</h2>
-                        <button onclick="openModal('note-modal')" class="bg-[#A37E63] text-white px-4 py-2 rounded-lg shadow hover:bg-[#8e6a51] transition">새 노트 추가</button>
+                        <button onclick="window.openModal('note-modal')" class="bg-[#A37E63] text-white px-4 py-2 rounded-lg shadow hover:bg-[#8e6a51] transition">새 노트 추가</button>
                     </div>
                     <div id="notes-list" class="scroll-area overflow-y-auto bg-white/50 p-4 rounded-lg"></div>
                 </div>
@@ -232,7 +244,7 @@
                 <div id="errors" class="hidden space-y-4">
                      <div class="flex justify-between items-center">
                         <h2 class="text-2xl font-semibold text-[#B5947C]">🧐 오답 노트 목록</h2>
-                        <button onclick="openModal('error-modal')" class="bg-[#A37E63] text-white px-4 py-2 rounded-lg shadow hover:bg-[#8e6a51] transition">새 오답 추가</button>
+                        <button onclick="window.openModal('error-modal')" class="bg-[#A37E63] text-white px-4 py-2 rounded-lg shadow hover:bg-[#8e6a51] transition">새 오답 추가</button>
                     </div>
                     <div id="errors-list" class="scroll-area overflow-y-auto bg-white/50 p-4 rounded-lg"></div>
                 </div>
@@ -257,7 +269,7 @@
                     <input type="number" id="note-book-page" placeholder="기본서 페이지" class="w-full p-2 border rounded-md">
                 </div>
                 <div class="flex justify-end space-x-3 mt-4"> <!-- Buttons always at the bottom -->
-                    <button type="button" onclick="closeModal('note-modal')" class="px-4 py-2 bg-gray-200 rounded-md hover:bg-gray-300">취소</button>
+                    <button type="button" onclick="window.closeModal('note-modal')" class="px-4 py-2 bg-gray-200 rounded-md hover:bg-gray-300">취소</button>
                     <button type="submit" class="px-4 py-2 bg-[#A37E63] text-white rounded-md hover:bg-[#8e6a51]">저장</button>
                 </div>
             </form>
@@ -280,7 +292,7 @@
                     <textarea id="error-commentary" placeholder="해설 요약" rows="3" class="w-full p-2 border rounded-md"></textarea>
                 </div>
                 <div class="flex justify-end space-x-3 mt-4"> <!-- Buttons always at the bottom -->
-                    <button type="button" onclick="closeModal('error-modal')" class="px-4 py-2 bg-gray-200 rounded-md hover:bg-gray-300">취소</button>
+                    <button type="button" onclick="window.closeModal('error-modal')" class="px-4 py-2 bg-gray-200 rounded-md hover:bg-gray-300">취소</button>
                     <button type="submit" class="px-4 py-2 bg-[#A37E63] text-white rounded-md hover:bg-[#8e6a51]">저장</button>
                 </div>
             </form>
@@ -292,16 +304,28 @@
         <div class="bg-white rounded-lg shadow-xl w-full max-w-3xl">
             <div id="detail-content" class="p-6 space-y-4 modal-content-area"></div> <!-- Scrollable content area -->
             <div class="flex justify-end p-4 bg-gray-50 rounded-b-lg"> <!-- Buttons always at the bottom -->
-                <button type="button" onclick="closeModal('detail-modal')" class="px-4 py-2 bg-gray-200 rounded-md hover:bg-gray-300">닫기</button>
+                <button type="button" onclick="window.closeModal('detail-modal')" class="px-4 py-2 bg-gray-200 rounded-md hover:bg-gray-300">닫기</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Delete Confirmation Modal -->
+    <div id="delete-confirm-modal" class="fixed inset-0 z-50 modal-backdrop hidden items-center justify-center p-4">
+        <div class="bg-white rounded-lg shadow-xl w-full max-w-sm p-6 space-y-4 text-center">
+            <h3 class="text-xl font-bold text-red-600">삭제 확인</h3>
+            <p class="text-gray-700">정말로 이 항목을 삭제하시겠습니까? 관련된 복습 스케줄도 함께 삭제됩니다.</p>
+            <div class="flex justify-center space-x-4 mt-4">
+                <button type="button" onclick="window.closeModal('delete-confirm-modal')" class="px-4 py-2 bg-gray-200 rounded-md hover:bg-gray-300">취소</button>
+                <button type="button" id="confirm-delete-button" class="px-4 py-2 bg-red-500 text-white rounded-md hover:bg-red-600">삭제</button>
             </div>
         </div>
     </div>
 
     <script type="module">
         // Import Firebase functions from the SDKs loaded in <head>
-        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { initializeApp, getApps, getApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
         import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-        import { getFirestore, doc, getDoc, addDoc, setDoc, updateDoc, deleteDoc, onSnapshot, collection, query, where, getDocs } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { getFirestore, doc, addDoc, setDoc, updateDoc, deleteDoc, onSnapshot, collection, query, where, getDocs } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
         // Global data store - populated by Firestore snapshots (this remains the data cache)
         window.db = {
@@ -315,17 +339,22 @@
         const CHART_COLORS = ['#B5947C', '#C8AB99', '#DBC3B5', '#E9DCD2', '#F1EAE4'];
         let charts = {};
 
+        // Variables to hold info for deletion confirmation
+        let itemToDelete = { type: null, id: null };
+
         // Wait for Firebase to be ready before proceeding
         window.appReady.then(() => {
-            // Access globally initialized Firebase instances
-            const dbInstance = window.firestoreDb; // This is now correctly window.firestoreDb
-            const authInstance = window.firebaseAuth; // This is now correctly window.firebaseAuth
-            const currentUserId = window.currentUserId;
-            const appId = window.appId;
+            // Access globally initialized Firebase instances and variables
+            // These are already available via `window.` prefix
+            // const dbInstance = window.firestoreDb; // No longer need to re-declare
+            // const authInstance = window.firebaseAuth; // No longer need to re-declare
+            // const currentUserId = window.currentUserId; // No longer need to re-declare
+            // const appId = window.appId; // No longer need to re-declare
 
-            console.log("Main script: Firebase is ready, currentUserId:", currentUserId, "appId:", appId);
+            console.log("Main script: Firebase is ready, currentUserId:", window.currentUserId, "appId:", window.appId);
 
             // Hide loading spinner and show main content
+            // These lines are moved here to ensure they run AFTER appReady resolves
             document.getElementById('loading-spinner').classList.add('hidden');
             document.getElementById('main-content').classList.remove('hidden');
 
@@ -334,6 +363,9 @@
             
             document.getElementById('note-form').addEventListener('submit', handleNoteFormSubmit);
             document.getElementById('error-form').addEventListener('submit', handleErrorFormSubmit);
+
+            // Set up listener for the confirm delete button
+            document.getElementById('confirm-delete-button').addEventListener('click', executeDeletion);
         });
 
         // --- CORE APP LOGIC ---
@@ -346,14 +378,8 @@
             document.getElementById('d-day-counter').textContent = `시험일까지 D-${diffDays}일`;
         }
 
-        function renderAll() {
-            renderTodayReview();
-            renderNotesList();
-            renderErrorsList();
-            renderCharts();
-        }
-
-        function changeTab(tabName) {
+        // Expose functions to the global scope for onclick attributes
+        window.changeTab = function(tabName) {
             document.querySelectorAll('[data-tab]').forEach(button => button.classList.remove('active'));
             document.querySelector(`[data-tab="${tabName}"]`).classList.add('active');
 
@@ -362,10 +388,21 @@
             });
         }
 
+        // Expose renderAll to global scope as well, might be called by other functions
+        window.renderAll = function() {
+            window.renderTodayReview();
+            window.renderNotesList();
+            window.renderErrorsList();
+            window.renderCharts();
+        }
+
         // --- MODAL HANDLING ---
-        function openModal(modalId, data = null) {
+        window.openModal = function(modalId, data = null) {
             const formId = modalId === 'note-modal' ? 'note-form' : 'error-form';
-            document.getElementById(formId).reset();
+            // Only reset if it's a form modal (not detail or confirm)
+            if (formId) {
+                document.getElementById(formId).reset();
+            }
 
             if (data) {
                  if (modalId === 'note-modal') {
@@ -382,16 +419,16 @@
                     document.getElementById('error-mistake-point').value = data.mistakePoint;
                     document.getElementById('error-commentary').value = data.commentary;
                 }
-            } else {
-                 document.getElementById('note-id').value = '';
-                 document.getElementById('error-id').value = '';
+            } else { // Clear hidden IDs if opening for a new item
+                 if (modalId === 'note-modal') document.getElementById('note-id').value = '';
+                 if (modalId === 'error-modal') document.getElementById('error-id').value = '';
             }
 
             document.getElementById(modalId).classList.remove('hidden');
             document.getElementById(modalId).classList.add('flex');
         }
 
-        function closeModal(modalId) {
+        window.closeModal = function(modalId) {
             document.getElementById(modalId).classList.add('hidden');
             document.getElementById(modalId).classList.remove('flex');
         }
@@ -408,19 +445,20 @@
                 keywords: document.getElementById('note-keywords').value,
                 content: document.getElementById('note-content').value,
                 bookPage: document.getElementById('note-book-page').value ? parseInt(document.getElementById('note-book-page').value) : null,
-                // createdAt will be set only for new documents in addDoc, otherwise keep existing
             };
 
             try {
                 if (noteId) { // Update existing note
-                    await setDoc(doc(window.getNotesCollectionRef(), noteId), { ...noteData, createdAt: window.db.notes.find(n => n.id === noteId)?.createdAt || new Date().toISOString() });
+                    // Preserve original createdAt when updating
+                    const originalCreatedAt = window.db.notes.find(n => n.id === noteId)?.createdAt || new Date().toISOString();
+                    await setDoc(doc(window.getNotesCollectionRef(), noteId), { ...noteData, createdAt: originalCreatedAt });
                     console.log('노트가 Firestore에서 수정되었습니다:', noteId);
                 } else { // Add new note
                     const newNoteRef = await addDoc(window.getNotesCollectionRef(), { ...noteData, createdAt: new Date().toISOString() });
                     console.log('새 노트가 Firestore에 추가되었습니다:', newNoteRef.id);
                     await addReviewScheduleItem('note', newNoteRef.id, new Date().toISOString()); // Add to review schedule with current timestamp
                 }
-                closeModal('note-modal');
+                window.closeModal('note-modal');
             } catch (e) {
                 console.error("노트 저장 중 오류 발생:", e);
             }
@@ -436,19 +474,20 @@
                 choiceSummary: document.getElementById('error-choice-summary').value,
                 mistakePoint: document.getElementById('error-mistake-point').value,
                 commentary: document.getElementById('error-commentary').value,
-                // createdAt will be set only for new documents in addDoc, otherwise keep existing
             };
 
             try {
                 if (errorId) { // Update existing error
-                    await setDoc(doc(window.getErrorsCollectionRef(), errorId), { ...errorData, createdAt: window.db.errors.find(err => err.id === errorId)?.createdAt || new Date().toISOString() });
+                    // Preserve original createdAt when updating
+                    const originalCreatedAt = window.db.errors.find(err => err.id === errorId)?.createdAt || new Date().toISOString();
+                    await setDoc(doc(window.getErrorsCollectionRef(), errorId), { ...errorData, createdAt: originalCreatedAt });
                     console.log('오답 노트가 Firestore에서 수정되었습니다:', errorId);
                 } else { // Add new error
                     const newErrorRef = await addDoc(window.getErrorsCollectionRef(), { ...errorData, createdAt: new Date().toISOString() });
                     console.log('새 오답 노트가 Firestore에 추가되었습니다:', newErrorRef.id);
                     await addReviewScheduleItem('error', newErrorRef.id, new Date().toISOString()); // Add to review schedule with current timestamp
                 }
-                closeModal('error-modal');
+                window.closeModal('error-modal');
             } catch (e) {
                 console.error("오답 노트 저장 중 오류 발생:", e);
             }
@@ -471,7 +510,7 @@
             }
         }
 
-        async function markAsReviewed(scheduleId) {
+        window.markAsReviewed = async function(scheduleId) {
             if (!window.currentUserId) { console.error("No user ID available for Firestore operation."); return; }
 
             const item = window.db.reviewSchedule.find(s => s.id === scheduleId);
@@ -482,7 +521,7 @@
 
             let nextReviewDate;
             if(newReviewCount <= reviewIntervals.length) {
-                const creationDate = new Date(item.createdAt);
+                const creationDate = new Date(item.createdAt); // Use original creation date
                 const nextDate = new Date(creationDate);
                 nextDate.setDate(creationDate.getDate() + reviewIntervals[newReviewCount - 1]);
                 nextReviewDate = nextDate.toISOString().split('T')[0];
@@ -512,29 +551,47 @@
             }
         }
 
-        async function deleteItem(type, docId) {
-            if (!confirm('정말로 삭제하시겠습니까? 관련된 복습 스케줄도 함께 삭제됩니다.')) return;
+        // Modified deleteItem to use custom confirm modal
+        window.deleteItem = async function(type, docId) {
+            itemToDelete = { type: type, id: docId }; // Store info for deletion
+            window.openModal('delete-confirm-modal'); // Open the custom confirmation modal
+        }
+
+        // New function to execute deletion after confirmation
+        async function executeDeletion() {
+            const { type, id } = itemToDelete;
+
+            if (!type || !id) {
+                console.error("No item selected for deletion.");
+                window.closeModal('delete-confirm-modal');
+                return;
+            }
             if (!window.currentUserId) { console.error("No user ID available for Firestore operation."); return; }
 
             try {
                 // Delete the main item
                 if (type === 'note') {
-                    await deleteDoc(doc(window.getNotesCollectionRef(), docId));
+                    await deleteDoc(doc(window.getNotesCollectionRef(), id));
                 } else if (type === 'error') {
-                    await deleteDoc(doc(window.getErrorsCollectionRef(), docId));
+                    await deleteDoc(doc(window.getErrorsCollectionRef(), id));
                 }
-                console.log(`${type} 항목이 Firestore에서 삭제되었습니다:`, docId);
+                console.log(`${type} 항목이 Firestore에서 삭제되었습니다:`, id);
 
                 // Find and delete related review schedule items
-                const q = query(window.getReviewScheduleCollectionRef(), where('type', '==', type), where('itemId', '==', docId));
+                const q = query(window.getReviewScheduleCollectionRef(), where('type', '==', type), where('itemId', '==', id));
                 const querySnapshot = await getDocs(q);
                 querySnapshot.forEach(async (docRef) => {
                     await deleteDoc(docRef.ref);
                     console.log('관련 복습 스케줄 항목도 삭제되었습니다:', docRef.id);
                 });
 
+                // Clear stored itemToDelete info
+                itemToDelete = { type: null, id: null };
+                window.closeModal('delete-confirm-modal');
+
             } catch (e) {
                 console.error("항목 삭제 중 오류 발생:", e);
+                window.closeModal('delete-confirm-modal'); // Close modal even on error
             }
         }
 
@@ -564,7 +621,7 @@
                             <span class="ml-3 font-medium">${title}</span>
                             <span class="text-sm text-gray-500 ml-2">(${data.subject}) - ${item.reviewCount}회 복습</span>
                         </div>
-                        <button onclick="markAsReviewed('${item.id}')" class="px-3 py-1 bg-green-500 text-white text-sm rounded-lg hover:bg-green-600 transition">복습 완료</button>
+                        <button onclick="window.markAsReviewed('${item.id}')" class="px-3 py-1 bg-green-500 text-white text-sm rounded-lg hover:bg-green-600 transition">복습 완료</button>
                     </div>
                 `;
             }).join('');
@@ -589,9 +646,9 @@
                                <p class="text-sm text-gray-500">${new Date(data.createdAt).toLocaleDateString()} | ${data.subject}</p>
                            </div>
                            <div class="flex space-x-2 ml-2">
-                               <button onclick="viewDetail('${type}', '${data.id}')" class="px-3 py-1 bg-blue-100 text-blue-600 text-xs rounded-md hover:bg-blue-200">보기</button>
-                               <button onclick="openModal('${type}-modal', window.db.${type}s.find(d=>d.id==='${data.id}'))" class="px-3 py-1 bg-yellow-100 text-yellow-600 text-xs rounded-md hover:bg-yellow-200">수정</button>
-                               <button onclick="deleteItem('${type}', '${data.id}')" class="px-3 py-1 bg-red-100 text-red-600 text-xs rounded-md hover:bg-red-200">삭제</button>
+                               <button onclick="window.viewDetail('${type}', '${data.id}')" class="px-3 py-1 bg-blue-100 text-blue-600 text-xs rounded-md hover:bg-blue-200">보기</button>
+                               <button onclick="window.openModal('${type}-modal', window.db.${type}s.find(d=>d.id==='${data.id}'))" class="px-3 py-1 bg-yellow-100 text-yellow-600 text-xs rounded-md hover:bg-yellow-200">수정</button>
+                               <button onclick="window.deleteItem('${type}', '${data.id}')" class="px-3 py-1 bg-red-100 text-red-600 text-xs rounded-md hover:bg-red-200">삭제</button>
                            </div>
                         </div>
                     </div>
@@ -638,7 +695,7 @@
                 `;
             }
             contentEl.innerHTML = html;
-            openModal('detail-modal');
+            window.openModal('detail-modal');
         };
 
         window.renderCharts = function() {
