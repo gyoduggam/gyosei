@@ -13,137 +13,112 @@
         import { getFirestore, doc, getDoc, addDoc, setDoc, updateDoc, deleteDoc, onSnapshot, collection, query, where, getDocs } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
         // Firebase configuration (provided by Canvas environment)
-        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
-        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        window.firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+        window.appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
         const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
 
-        let app;
-        let dbInstance;
-        let authInstance;
-        let currentUserId = null;
-        let isAuthReady = false;
+        // Initialize Firebase app and services globally ONCE
+        window.firebaseApp = initializeApp(window.firebaseConfig);
+        window.firestoreDb = getFirestore(window.firebaseApp);
+        window.firebaseAuth = getAuth(window.firebaseApp);
 
-        // Global data store - populated by Firestore snapshots
-        // THIS IS THE LOCAL CACHE FOR FIRESTORE DATA
+        // Global data store - populated by Firestore snapshots (this remains the data cache)
         window.db = {
             notes: [],
             errors: [],
             reviewSchedule: [],
             reviewHistory: {}
         };
+        // Global currentUserId, updated by auth state listener
+        window.currentUserId = null;
+
+        let isAuthReady = false;
 
         window.appReady = new Promise(resolve => {
-            document.addEventListener('DOMContentLoaded', async () => {
-                try {
-                    app = initializeApp(firebaseConfig);
-                    dbInstance = getFirestore(app);
-                    authInstance = getAuth(app);
-
-                    // IMPORTANT: Do NOT overwrite window.db with dbInstance.
-                    // window.db is meant to be the local data cache.
-                    window.auth = authInstance; // Make auth globally available
-                    window.appId = appId;
-                    window.firebaseConfig = firebaseConfig; // Make firebaseConfig globally available
-                    // window.currentUserId will be set by onAuthStateChanged
-
-                    // Set up auth state observer
-                    onAuthStateChanged(authInstance, async (user) => {
-                        if (user) {
-                            currentUserId = user.uid;
-                            window.currentUserId = currentUserId; // Update global currentUserId
-                            document.getElementById('user-id-display').textContent = `사용자 ID: ${currentUserId}`;
-                            console.log("Firebase Auth: User signed in with UID:", currentUserId);
-                            isAuthReady = true;
-                            resolve(); // Resolve promise when auth is ready
-                            initializeFirestoreListeners(); // Start listening to Firestore
-                        } else {
-                            currentUserId = null;
-                            window.currentUserId = null; // Clear global currentUserId
-                            document.getElementById('user-id-display').textContent = `로그인 중...`;
-                            console.log("Firebase Auth: No user signed in. Attempting sign-in...");
-                            try {
-                                if (initialAuthToken) {
-                                    await signInWithCustomToken(authInstance, initialAuthToken);
-                                    console.log("Firebase Auth: Signed in with custom token.");
-                                } else {
-                                    await signInAnonymously(authInstance);
-                                    console.log("Firebase Auth: Signed in anonymously.");
-                                }
-                            } catch (signInError) {
-                                console.error("Firebase Auth: Sign-in failed:", signInError);
-                                // Fallback to a random ID if sign-in fails (though data won't persist if security rules require auth)
-                                currentUserId = crypto.randomUUID();
-                                window.currentUserId = currentUserId;
-                                document.getElementById('user-id-display').textContent = `사용자 ID (비로그인): ${currentUserId}`;
-                                isAuthReady = true;
-                                resolve(); // Resolve even if anonymous sign-in fails
-                            }
-                        }
-                    });
-
-                } catch (e) {
-                    console.error("Firebase initialization failed:", e);
-                    document.getElementById('loading-spinner').innerHTML = `<p class="text-red-500">Firebase 초기화 실패. 콘솔을 확인하세요.</p>`;
-                    // Resolve promise even on error to allow UI to load partially
+            // Set up auth state observer
+            onAuthStateChanged(window.firebaseAuth, async (user) => {
+                if (user) {
+                    window.currentUserId = user.uid;
+                    document.getElementById('user-id-display').textContent = `사용자 ID: ${window.currentUserId}`;
+                    console.log("Firebase Auth: User signed in with UID:", window.currentUserId);
                     isAuthReady = true;
-                    resolve();
+                    resolve(); // Resolve promise when auth is ready
+                    initializeFirestoreListeners(); // Start listening to Firestore
+                } else {
+                    window.currentUserId = null;
+                    document.getElementById('user-id-display').textContent = `로그인 중...`;
+                    console.log("Firebase Auth: No user signed in. Attempting sign-in...");
+                    try {
+                        if (initialAuthToken) {
+                            await signInWithCustomToken(window.firebaseAuth, initialAuthToken);
+                            console.log("Firebase Auth: Signed in with custom token.");
+                        } else {
+                            await signInAnonymously(window.firebaseAuth);
+                            console.log("Firebase Auth: Signed in anonymously.");
+                        }
+                    } catch (signInError) {
+                        console.error("Firebase Auth: Sign-in failed:", signInError);
+                        // Fallback to a random ID if sign-in fails (though data won't persist if security rules require auth)
+                        window.currentUserId = crypto.randomUUID();
+                        document.getElementById('user-id-display').textContent = `사용자 ID (비로그인): ${window.currentUserId}`;
+                        isAuthReady = true;
+                        resolve(); // Resolve even if anonymous sign-in fails
+                    }
                 }
+            }, (error) => {
+                console.error("Firebase Auth state change error:", error);
+                document.getElementById('loading-spinner').innerHTML = `<p class="text-red-500">인증 오류. 콘솔을 확인하세요.</p>`;
+                isAuthReady = true;
+                resolve(); // Resolve even on auth error
             });
         });
 
-        // Global functions for Firebase operations, callable from main script
-        // These now correctly use dbInstance (the Firestore client)
-        window.getNotesCollectionRef = () => collection(dbInstance, `artifacts/${appId}/users/${currentUserId}/notes`);
-        window.getErrorsCollectionRef = () => collection(dbInstance, `artifacts/${appId}/users/${currentUserId}/errors`);
-        window.getReviewScheduleCollectionRef = () => collection(dbInstance, `artifacts/${appId}/users/${currentUserId}/reviewSchedule`);
-        window.getReviewHistoryDocRef = () => doc(dbInstance, `artifacts/${appId}/users/${currentUserId}/appData/reviewHistoryDoc`);
+        // Global functions for Firestore collection/document references
+        window.getNotesCollectionRef = () => collection(window.firestoreDb, `artifacts/${window.appId}/users/${window.currentUserId}/notes`);
+        window.getErrorsCollectionRef = () => collection(window.firestoreDb, `artifacts/${window.appId}/users/${window.currentUserId}/errors`);
+        window.getReviewScheduleCollectionRef = () => collection(window.firestoreDb, `artifacts/${window.appId}/users/${window.currentUserId}/reviewSchedule`);
+        window.getReviewHistoryDocRef = () => doc(window.firestoreDb, `artifacts/${window.appId}/users/${window.currentUserId}/appData/reviewHistoryDoc`);
 
         async function initializeFirestoreListeners() {
-            if (!isAuthReady || !currentUserId) {
+            if (!isAuthReady || !window.currentUserId) {
                 console.log("Auth not ready or userId not set. Cannot initialize Firestore listeners.");
                 return;
             }
 
-            // Listen for notes
+            // Listeners for data changes in Firestore
             onSnapshot(window.getNotesCollectionRef(), (snapshot) => {
-                const notesData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-                window.db.notes = notesData; // Update the global data cache
-                console.log("Notes loaded from Firestore:", notesData);
-                window.renderNotesList(); // Re-render notes list
-                window.renderCharts(); // Re-render charts
+                window.db.notes = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                console.log("Notes loaded from Firestore:", window.db.notes);
+                window.renderNotesList();
+                window.renderCharts();
             }, (error) => console.error("Error listening to notes:", error));
 
-            // Listen for errors
             onSnapshot(window.getErrorsCollectionRef(), (snapshot) => {
-                const errorsData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-                window.db.errors = errorsData; // Update the global data cache
-                console.log("Errors loaded from Firestore:", errorsData);
-                window.renderErrorsList(); // Re-render errors list
-                window.renderCharts(); // Re-render charts
+                window.db.errors = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                console.log("Errors loaded from Firestore:", window.db.errors);
+                window.renderErrorsList();
+                window.renderCharts();
             }, (error) => console.error("Error listening to errors:", error));
 
-            // Listen for review schedule
             onSnapshot(window.getReviewScheduleCollectionRef(), (snapshot) => {
-                const reviewScheduleData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-                window.db.reviewSchedule = reviewScheduleData; // Update the global data cache
-                console.log("Review Schedule loaded from Firestore:", reviewScheduleData);
-                window.renderTodayReview(); // Re-render today's review
+                window.db.reviewSchedule = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                console.log("Review Schedule loaded from Firestore:", window.db.reviewSchedule);
+                window.renderTodayReview();
             }, (error) => console.error("Error listening to review schedule:", error));
 
-            // Listen for review history
             onSnapshot(window.getReviewHistoryDocRef(), (docSnapshot) => {
                 if (docSnapshot.exists()) {
-                    window.db.reviewHistory = docSnapshot.data().history || {}; // Update the global data cache
+                    window.db.reviewHistory = docSnapshot.data().history || {};
                     console.log("Review History loaded from Firestore:", window.db.reviewHistory);
                 } else {
-                    window.db.reviewHistory = {}; // Initialize empty if document doesn't exist
+                    window.db.reviewHistory = {};
                     console.log("Review History document does not exist, initializing empty.");
                 }
-                window.renderCharts(); // Re-render charts
+                window.renderCharts();
             }, (error) => console.error("Error listening to review history:", error));
 
-            // Hide loading spinner once data is potentially ready
             document.getElementById('loading-spinner').classList.add('hidden');
+            document.getElementById('main-content').classList.remove('hidden');
         }
     </script>
     <!-- Chosen Palette: Calm Focus -->
@@ -328,16 +303,7 @@
         import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
         import { getFirestore, doc, getDoc, addDoc, setDoc, updateDoc, deleteDoc, onSnapshot, collection, query, where, getDocs } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
-        // Firebase variables will be populated from window scope set by the initial script
-        let dbInstance;
-        let authInstance;
-        let currentUserId;
-        let appId;
-        // Access firebaseConfig from window scope
-        let firebaseConfig; 
-
-        // Global data store - populated by Firestore snapshots
-        // THIS IS THE LOCAL CACHE FOR FIRESTORE DATA
+        // Global data store - populated by Firestore snapshots (this remains the data cache)
         window.db = {
             notes: [],
             errors: [],
@@ -351,12 +317,12 @@
 
         // Wait for Firebase to be ready before proceeding
         window.appReady.then(() => {
-            // dbInstance, authInstance, currentUserId, appId are already set globally by the first script tag
-            firebaseConfig = window.firebaseConfig; // Get firebaseConfig from window scope
-            dbInstance = getFirestore(initializeApp(firebaseConfig)); // Ensure dbInstance is the Firestore client
-            authInstance = getAuth(initializeApp(firebaseConfig)); // Ensure authInstance is the Auth client
-            currentUserId = window.currentUserId;
-            appId = window.appId;
+            // Access globally initialized Firebase instances
+            const dbInstance = window.firestoreDb; // This is now correctly window.firestoreDb
+            const authInstance = window.firebaseAuth; // This is now correctly window.firebaseAuth
+            const currentUserId = window.currentUserId;
+            const appId = window.appId;
+
             console.log("Main script: Firebase is ready, currentUserId:", currentUserId, "appId:", appId);
 
             // Hide loading spinner and show main content
@@ -433,7 +399,7 @@
         // --- FIRESTORE OPERATIONS ---
         async function handleNoteFormSubmit(e) {
             e.preventDefault();
-            if (!currentUserId) { console.error("No user ID available for Firestore operation."); return; }
+            if (!window.currentUserId) { console.error("No user ID available for Firestore operation."); return; }
 
             const noteId = document.getElementById('note-id').value;
             const noteData = {
@@ -442,17 +408,17 @@
                 keywords: document.getElementById('note-keywords').value,
                 content: document.getElementById('note-content').value,
                 bookPage: document.getElementById('note-book-page').value ? parseInt(document.getElementById('note-book-page').value) : null,
-                createdAt: noteId ? window.db.notes.find(n => n.id === noteId)?.createdAt : new Date().toISOString()
+                // createdAt will be set only for new documents in addDoc, otherwise keep existing
             };
 
             try {
                 if (noteId) { // Update existing note
-                    await setDoc(doc(window.getNotesCollectionRef(), noteId), noteData);
+                    await setDoc(doc(window.getNotesCollectionRef(), noteId), { ...noteData, createdAt: window.db.notes.find(n => n.id === noteId)?.createdAt || new Date().toISOString() });
                     console.log('노트가 Firestore에서 수정되었습니다:', noteId);
                 } else { // Add new note
                     const newNoteRef = await addDoc(window.getNotesCollectionRef(), { ...noteData, createdAt: new Date().toISOString() });
                     console.log('새 노트가 Firestore에 추가되었습니다:', newNoteRef.id);
-                    await addReviewScheduleItem('note', newNoteRef.id, noteData.createdAt); // Add to review schedule
+                    await addReviewScheduleItem('note', newNoteRef.id, new Date().toISOString()); // Add to review schedule with current timestamp
                 }
                 closeModal('note-modal');
             } catch (e) {
@@ -462,7 +428,7 @@
 
         async function handleErrorFormSubmit(e) {
             e.preventDefault();
-            if (!currentUserId) { console.error("No user ID available for Firestore operation."); return; }
+            if (!window.currentUserId) { console.error("No user ID available for Firestore operation."); return; }
 
             const errorId = document.getElementById('error-id').value;
             const errorData = {
@@ -470,17 +436,17 @@
                 choiceSummary: document.getElementById('error-choice-summary').value,
                 mistakePoint: document.getElementById('error-mistake-point').value,
                 commentary: document.getElementById('error-commentary').value,
-                createdAt: errorId ? window.db.errors.find(err => err.id === errorId)?.createdAt : new Date().toISOString()
+                // createdAt will be set only for new documents in addDoc, otherwise keep existing
             };
 
             try {
                 if (errorId) { // Update existing error
-                    await setDoc(doc(window.getErrorsCollectionRef(), errorId), errorData);
+                    await setDoc(doc(window.getErrorsCollectionRef(), errorId), { ...errorData, createdAt: window.db.errors.find(err => err.id === errorId)?.createdAt || new Date().toISOString() });
                     console.log('오답 노트가 Firestore에서 수정되었습니다:', errorId);
                 } else { // Add new error
                     const newErrorRef = await addDoc(window.getErrorsCollectionRef(), { ...errorData, createdAt: new Date().toISOString() });
                     console.log('새 오답 노트가 Firestore에 추가되었습니다:', newErrorRef.id);
-                    await addReviewScheduleItem('error', newErrorRef.id, errorData.createdAt); // Add to review schedule
+                    await addReviewScheduleItem('error', newErrorRef.id, new Date().toISOString()); // Add to review schedule with current timestamp
                 }
                 closeModal('error-modal');
             } catch (e) {
@@ -489,13 +455,13 @@
         }
 
         async function addReviewScheduleItem(type, itemId, createdAt) {
-            if (!currentUserId) { console.error("No user ID available for Firestore operation."); return; }
+            if (!window.currentUserId) { console.error("No user ID available for Firestore operation."); return; }
             const today = new Date().toISOString().split('T')[0];
             try {
                 await addDoc(window.getReviewScheduleCollectionRef(), {
                     type: type,
                     itemId: itemId, // Use itemId to prevent conflict with Firestore's doc.id
-                    createdAt: createdAt,
+                    createdAt: createdAt, // Use the creation date of the note/error
                     reviewCount: 0,
                     nextReviewDate: today
                 });
@@ -506,7 +472,7 @@
         }
 
         async function markAsReviewed(scheduleId) {
-            if (!currentUserId) { console.error("No user ID available for Firestore operation."); return; }
+            if (!window.currentUserId) { console.error("No user ID available for Firestore operation."); return; }
 
             const item = window.db.reviewSchedule.find(s => s.id === scheduleId);
             if (!item) { console.error("Review schedule item not found."); return; }
@@ -548,7 +514,7 @@
 
         async function deleteItem(type, docId) {
             if (!confirm('정말로 삭제하시겠습니까? 관련된 복습 스케줄도 함께 삭제됩니다.')) return;
-            if (!currentUserId) { console.error("No user ID available for Firestore operation."); return; }
+            if (!window.currentUserId) { console.error("No user ID available for Firestore operation."); return; }
 
             try {
                 // Delete the main item
@@ -576,7 +542,6 @@
         window.renderTodayReview = function() {
             const listEl = document.getElementById('today-review-list');
             const today = new Date().toISOString().split('T')[0];
-            // Ensure window.db.reviewSchedule is an array before filtering
             const itemsToReview = (window.db.reviewSchedule || []).filter(item => item.nextReviewDate <= today);
 
             if (itemsToReview.length === 0) {
@@ -586,9 +551,9 @@
 
             listEl.innerHTML = itemsToReview.map(item => {
                 const data = item.type === 'note'
-                    ? (window.db.notes || []).find(d => d.id === item.itemId) // Use itemId here
-                    : (window.db.errors || []).find(d => d.id === item.itemId); // Use itemId here
-                if (!data) return ''; // If data not found, skip rendering
+                    ? (window.db.notes || []).find(d => d.id === item.itemId)
+                    : (window.db.errors || []).find(d => d.id === item.itemId);
+                if (!data) return '';
 
                 const title = item.type === 'note' ? data.topic : data.choiceSummary;
 
@@ -607,9 +572,9 @@
 
         window.renderList = function(type) {
             const listEl = document.getElementById(`${type}s-list`);
-            const dataList = window.db[`${type}s`]; // This relies on window.db[type + 's'] being an array
+            const dataList = window.db[`${type}s`];
 
-            if (!dataList || dataList.length === 0) { // Check if dataList is null/undefined or empty
+            if (!dataList || dataList.length === 0) {
                 listEl.innerHTML = `<div class="text-center text-gray-500 p-4">아직 추가된 ${type === 'note' ? '노트가' : '오답이'} 없습니다.</div>`;
                 return;
             }
@@ -638,7 +603,7 @@
         window.renderErrorsList = function() { window.renderList('error'); };
 
         window.viewDetail = function(type, id) {
-            const data = (window.db[`${type}s`] || []).find(d => d.id === id); // Ensure array before find
+            const data = (window.db[`${type}s`] || []).find(d => d.id === id);
             const contentEl = document.getElementById('detail-content');
 
             if (!data) { contentEl.innerHTML = `<p class="text-red-500">데이터를 찾을 수 없습니다.</p>`; return; }
@@ -686,7 +651,6 @@
             const ctx = document.getElementById('subjectChart').getContext('2d');
             const data = {
                 labels: SUBJECTS,
-                // Ensure window.db.notes is an array before filtering
                 datasets: [{
                     label: '과목별 노트 수',
                     data: SUBJECTS.map(s => (window.db.notes || []).filter(n => n.subject === s).length),
@@ -708,7 +672,6 @@
             const ctx = document.getElementById('errorChart').getContext('2d');
             const data = {
                 labels: SUBJECTS,
-                // Ensure window.db.errors is an array before filtering
                 datasets: [{
                     label: '과목별 오답 수',
                     data: SUBJECTS.map(s => (window.db.errors || []).filter(e => e.subject === s).length),
@@ -729,12 +692,10 @@
             const labels = [];
             const dataPoints = [];
             const today = new Date();
-            // Get data for the last 15 days
             for(let i=14; i>=0; i--) {
                 const date = new Date(today);
                 date.setDate(today.getDate() - i);
                 const dateString = date.toISOString().split('T')[0];
-                // Ensure window.db.reviewHistory is an object before accessing properties
                 dataPoints.push((window.db.reviewHistory || {})[dateString] || 0);
             }
 
